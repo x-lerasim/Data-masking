@@ -73,25 +73,18 @@ Postgres 17 для метаданных Airflow, clickhouse-connect. Три ко
 
 ## Запуск
 
-Нужен Docker с Compose v2.
+Нужен Docker с Compose v2. Одна команда:
 
 ```bash
-cp .env.example .env
+docker compose up -d
 ```
 
-```bash
-echo "MASKING_SALT=$(openssl rand -hex 32)" >> .env
-```
+Через 1–2 минуты (при старте Airflow доустанавливает clickhouse-connect):
 
-```bash
-docker compose up -d --build
-```
+- Airflow: http://localhost:8080 — вход без пароля;
+- ClickHouse Play: http://localhost:8123/play — `etl_user` / `etl_pass`, `ml_user` / `ml_pass`.
 
-Через ~1 минуту:
-
-- Airflow: http://localhost:8080 (вход без пароля — демо-режим simple auth manager);
-- ClickHouse Play: http://localhost:8123/play
-  (пользователи `etl_user` / `etl_pass`, `ml_user` / `ml_pass` — из `.env`).
+Дальше всё в UI Airflow: DAG `mask_dwh_to_ml` → **Trigger**.
 
 Остановить и удалить данные: `docker compose down -v`.
 
@@ -116,8 +109,7 @@ docker compose up -d --build
 ## Структура
 
 ```
-docker-compose.yml        postgres + clickhouse + airflow (standalone, LocalExecutor)
-Dockerfile.airflow        apache/airflow:3.4.0 + clickhouse-connect
+docker-compose.yml        postgres + clickhouse + airflow (standalone, LocalExecutor), вся конфигурация
 clickhouse/initdb/        базы dwh, ml и пользователи etl_user, ml_user (RBAC)
 clickhouse/config/        уровень логов information (см. «Соль»)
 dags/mask_dwh_to_ml.py    DAG: только вызывает функции модулей
@@ -155,30 +147,37 @@ checks.sql                запросы для показа
 
 ### Соль
 
-- задаётся в `.env` (`MASKING_SALT`), в контейнер Airflow приходит как
-  Airflow Variable `masking_salt` (через `AIRFLOW_VAR_MASKING_SALT`); `.env` в `.gitignore`;
-- в ClickHouse передаётся только параметром запроса `{salt:String}`
-  (server-side binding clickhouse-connect), в SQL-файлах её нет;
-- ClickHouse пишет в `system.query_log` текст запроса с уже подставленными
-  параметрами, поэтому для запросов с солью отключено журналирование
-  (`log_queries=0`, `masking/db.py`); уровень серверного лога — `information`,
-  чтобы URI HTTP-запросов с `param_salt` не попадали в trace-лог;
-- имя переменной содержит `salt` → Airflow маскирует её значение в логах задач
-  (`AIRFLOW__CORE__SENSITIVE_VAR_CONN_NAMES`);
-- `validate_ml` соль не использует: исходные ключи ищутся сравнением значений.
+Соль — случайная секретная строка, которая подмешивается к `client_key` перед
+хэшированием. Без неё псевдоним легко обратить: ключей всего 1000, хэши всех чисел
+1…1000 перебираются за миллисекунды. С солью перебор бесполезен, а одинаковый
+ключ при той же соли всегда даёт тот же псевдоним — поэтому он стабилен между запусками.
 
-Проверено на стенде: после запусков DAG значение соли не найдено в логах задач
-Airflow, stdout контейнеров, логах ClickHouse, `system.query_log` и таблицах `ml`.
-Остаточный риск: если запрос с солью упадёт, ClickHouse может записать его текст
-в `clickhouse-server.err.log`; пока запрос выполняется, он виден в `system.processes`
-(только пользователю с правами на него).
+- генерируется сама при первом `docker compose up` (64 hex-символа) и хранится как
+  Airflow Variable `masking_salt` в Postgres Airflow; в git, SQL-файлах и `ml` её нет;
+- в ClickHouse передаётся параметром запроса `{salt:String}`;
+- ClickHouse по умолчанию записывает в журнал `system.query_log` текст запроса
+  с уже подставленными значениями параметров — соль оказывалась бы там в открытом
+  виде. Поэтому для запросов с солью журнал отключён (`log_queries=0`, `masking/db.py`),
+  а серверный лог понижен до `information`;
+- Airflow заменяет значение на `***` в логах задач (`SENSITIVE_VAR_CONN_NAMES=salt`);
+- `validate_ml` соль не использует.
+
+Проверено: после запуска DAG соли нет в логах задач, логах контейнеров,
+`system.query_log` и таблицах `ml`. Пересоздать соль (псевдонимы сменятся):
+`docker compose down -v`.
+
+**Почему SHA-256, а не «простой» хэш.** Замер на стенде, 10 млн строк:
+SHA-256 — 1,3 с, `sipHash64` — 0,33 с, `cityHash64` — 0,14 с. У нас ~20 тыс. строк,
+то есть ~3 мс против ~0,3 мс — разница незаметна. Зато SHA-256
+криптографический: по псевдонимам нельзя подобрать соль. Быстрые хэши
+(`cityHash64`, `xxHash`) этого не гарантируют.
 
 ## k-анонимность
 
 Квазиидентификаторы: `federal_district`, `rooms_range`, `connected_quarter`.
 Размер группы считается по **клиентам** `dim_client` (окно `count() OVER (PARTITION BY …)`
 в `dwh_client_qi.sql`), а не по строкам факта. Клиенты из групп меньше `K_MIN`
-(`.env` → Variable `k_min`, по умолчанию 5) в `ml` не попадают, их строки факта тоже.
+(Variable `k_min` = 5, задаётся в `docker-compose.yml`) в `ml` не попадают, их строки факта тоже.
 
 При `K_MIN = 5` подавляется 195 клиентов из 1000 (3 883 строки факта), в `ml`
 остаётся 805 клиентов в 65 группах, фактическое k = 5. Подавление в основном

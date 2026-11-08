@@ -1,22 +1,25 @@
 name: data-masking
 
+# Запуск: docker compose up -d
+# Пароли учебные и заданы прямо здесь — это демо-стенд.
+
 x-airflow-env: &airflow-env
   AIRFLOW__CORE__EXECUTOR: LocalExecutor
   AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
   AIRFLOW__CORE__LOAD_EXAMPLES: "False"
   AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "False"
-  # Демо-стенд: вход в UI без пароля (simple auth manager, все — админы)
+  # Вход в UI без пароля (simple auth manager, все — админы)
   AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "True"
-  # Значения переменных с "salt" в имени маскируются в логах и UI
+  # Значения переменных с "salt" в имени Airflow заменяет на *** в логах и UI
   AIRFLOW__CORE__SENSITIVE_VAR_CONN_NAMES: "salt"
+  # Драйвер ClickHouse ставится при старте контейнера — свой Dockerfile не нужен
+  _PIP_ADDITIONAL_REQUIREMENTS: clickhouse-connect==1.12.0
   PYTHONPATH: /opt/airflow/project
-  # Airflow Variables из окружения: masking_salt, k_min
-  AIRFLOW_VAR_MASKING_SALT: ${MASKING_SALT:?MASKING_SALT не задан в .env, см. README}
-  AIRFLOW_VAR_K_MIN: ${K_MIN:-5}
+  AIRFLOW_VAR_K_MIN: "5"            # порог k-анонимности (Variable k_min)
   CLICKHOUSE_HOST: clickhouse
   CLICKHOUSE_PORT: "8123"
   ETL_USER: etl_user
-  ETL_USER_PASSWORD: ${ETL_USER_PASSWORD}
+  ETL_USER_PASSWORD: etl_pass
 
 services:
   postgres:
@@ -36,10 +39,10 @@ services:
     image: clickhouse/clickhouse-server:26.8
     environment:
       CLICKHOUSE_USER: admin
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_ADMIN_PASSWORD}
+      CLICKHOUSE_PASSWORD: admin_pass
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
-      ETL_USER_PASSWORD: ${ETL_USER_PASSWORD}
-      ML_USER_PASSWORD: ${ML_USER_PASSWORD}
+      ETL_USER_PASSWORD: etl_pass
+      ML_USER_PASSWORD: ml_pass
     ports:
       - "8123:8123"
     volumes:
@@ -52,11 +55,17 @@ services:
       retries: 30
 
   airflow:
-    build:
-      context: .
-      dockerfile: Dockerfile.airflow
-    image: data-masking-airflow:local
-    command: standalone
+    image: apache/airflow:3.4.0-python3.12
+    # Соль для псевдонимов генерируется один раз при первом старте и хранится
+    # как Airflow Variable masking_salt в Postgres (том pg_data), не в git.
+    command:
+      - bash
+      - -c
+      - |
+        airflow db migrate > /dev/null
+        airflow variables get masking_salt > /dev/null 2>&1 ||
+          airflow variables set masking_salt "$$(python -c 'import secrets; print(secrets.token_hex(32))')" > /dev/null
+        exec airflow standalone
     environment: *airflow-env
     ports:
       - "8080:8080"

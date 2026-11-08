@@ -13,7 +13,7 @@ from synthetic.generate import generate
 
 
 def _salt() -> str:
-    # AIRFLOW_VAR_MASKING_SALT из .env или Variable masking_salt в UI.
+    # Variable masking_salt создаётся при первом старте контейнера (docker-compose.yml).
     # Имя содержит "salt" → Airflow маскирует значение в логах (SENSITIVE_VAR_CONN_NAMES).
     salt = Variable.get("masking_salt")
     masker.check_salt(salt)
