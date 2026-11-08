@@ -1,0 +1,73 @@
+name: data-masking
+
+x-airflow-env: &airflow-env
+  AIRFLOW__CORE__EXECUTOR: LocalExecutor
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+  AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+  AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "False"
+  # Демо-стенд: вход в UI без пароля (simple auth manager, все — админы)
+  AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "True"
+  # Значения переменных с "salt" в имени маскируются в логах и UI
+  AIRFLOW__CORE__SENSITIVE_VAR_CONN_NAMES: "salt"
+  PYTHONPATH: /opt/airflow/project
+  # Airflow Variables из окружения: masking_salt, k_min
+  AIRFLOW_VAR_MASKING_SALT: ${MASKING_SALT:?MASKING_SALT не задан в .env, см. README}
+  AIRFLOW_VAR_K_MIN: ${K_MIN:-5}
+  CLICKHOUSE_HOST: clickhouse
+  CLICKHOUSE_PORT: "8123"
+  ETL_USER: etl_user
+  ETL_USER_PASSWORD: ${ETL_USER_PASSWORD}
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 20
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.8
+    environment:
+      CLICKHOUSE_USER: admin
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_ADMIN_PASSWORD}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+      ETL_USER_PASSWORD: ${ETL_USER_PASSWORD}
+      ML_USER_PASSWORD: ${ML_USER_PASSWORD}
+    ports:
+      - "8123:8123"
+    volumes:
+      - ch_data:/var/lib/clickhouse
+      - ./clickhouse/initdb:/docker-entrypoint-initdb.d:ro
+      - ./clickhouse/config/logging.xml:/etc/clickhouse-server/config.d/logging.xml:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8123/ping"]
+      interval: 5s
+      retries: 30
+
+  airflow:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    image: data-masking-airflow:local
+    command: standalone
+    environment: *airflow-env
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./masking:/opt/airflow/project/masking
+      - ./synthetic:/opt/airflow/project/synthetic
+    depends_on:
+      postgres: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
+
+volumes:
+  pg_data:
+  ch_data:

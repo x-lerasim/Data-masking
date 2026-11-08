@@ -1,0 +1,71 @@
+# Правила обезличивания по полям: dwh (слой 1) → ml (слой 2).
+# masker.py проверяет, что у КАЖДОЙ колонки dwh.dim_client есть правило:
+# новая колонка без правила остановит DAG, а не уедет в ml молча.
+#
+# action:
+#   pseudonymize — замена на псевдоним SHA-256(соль || ключ); соль — параметр запроса
+#   drop         — в ml не переносится
+#   mask         — частичное скрытие значения
+#   generalize   — обобщение до категории
+#   copy         — без изменений
+
+tables:
+  dim_client:
+    client_key:     {action: pseudonymize, target: client_key,
+                     how: "первые 8 байт SHA-256(соль || ':' || client_key) в hex (16 символов)"}
+    contact_name:   {action: drop}
+    hotel_name:     {action: drop}
+    inn:            {action: drop}
+    email:          {action: mask, target: email_masked, how: "первая буква + *** + @домен: i***@mail.ru"}
+    phone:          {action: mask, target: phone_masked, how: "+7 *** *** + последние 4 цифры: +7 *** *** 12 34"}
+    city:           {action: generalize, target: federal_district, how: "справочник city_to_district"}
+    rooms_count:    {action: generalize, target: rooms_range, how: "диапазоны rooms_ranges"}
+    connected_date: {action: generalize, target: connected_quarter, how: "год и квартал: 2024-Q3"}
+  dim_tariff:
+    "*": {action: copy}
+  dim_date:
+    "*": {action: copy}
+  fact_client_activity:
+    client_key: {action: pseudonymize, target: client_key, how: "тот же псевдоним, что в dim_client"}
+    "*":        {action: copy}
+
+k_anonymity:
+  # считается по клиентам ml.dim_client, а не по строкам факта
+  quasi_identifiers: [federal_district, rooms_range, connected_quarter]
+  # порог K_MIN — из Airflow Variable k_min (в docker-compose — из .env K_MIN)
+  on_violation: suppress   # клиент из группы < K_MIN и все его строки факта в ml не попадают
+
+rooms_ranges:
+  # верхние границы (включительно) и подписи; последняя подпись — всё, что больше
+  edges:  [20, 50, 100]
+  labels: ["до 20", "21–50", "51–100", "100+"]
+
+unknown_district: "Не определён"
+
+city_to_district:
+  Москва: Центральный
+  Ярославль: Центральный
+  Тула: Центральный
+  Владимир: Центральный
+  Суздаль: Центральный
+  Кострома: Центральный
+  Санкт-Петербург: Северо-Западный
+  Калининград: Северо-Западный
+  Великий Новгород: Северо-Западный
+  Мурманск: Северо-Западный
+  Сочи: Южный
+  Краснодар: Южный
+  Анапа: Южный
+  Геленджик: Южный
+  Ростов-на-Дону: Южный
+  Казань: Приволжский
+  Нижний Новгород: Приволжский
+  Самара: Приволжский
+  Екатеринбург: Уральский
+  Тюмень: Уральский
+  Новосибирск: Сибирский
+  Иркутск: Сибирский
+  Владивосток: Дальневосточный
+  Хабаровск: Дальневосточный
+  Кисловодск: Северо-Кавказский
+  Пятигорск: Северо-Кавказский
