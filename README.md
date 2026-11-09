@@ -16,7 +16,8 @@ Postgres 17 для метаданных Airflow, clickhouse-connect. Три ко
       ▼               ▼               ▼            ▼            ▼            ▼
 ┌──────────────── ClickHouse ──────────────────────────────────────────────────────┐
 │  dwh  (слой 1, ПДн)                 ml  (слой 2, обезличено)                       │
-│  доступ: etl_user                   доступ: etl_user (запись), ml_user (SELECT)    │
+│  доступ: etl_user                   доступ: etl_user (всё), ml_user (SELECT только │
+│                                     v_ml_client_month и masking_log)              │
 │                                                                                   │
 │  dim_client ──── псевдоним, маски, ──────► dim_client                             │
 │                  обобщение, k-анонимность                                         │
@@ -74,6 +75,9 @@ Postgres 17 для метаданных Airflow, clickhouse-connect. Три ко
 ## Запуск
 
 Нужен Docker с Compose v2. Без `.env` compose не запустится.
+В `.env.example` лежит демонстрационный `FERNET_KEY`; для чего-либо кроме демо
+сгенерируйте свой (`python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`)
+и не меняйте его, пока жив volume `pg_data` (см. «Соль»).
 
 ```bash
 cp .env.example .env
@@ -105,16 +109,19 @@ docker compose up -d
      помесячная активность совпадает до цифры. Найти его в `ml` удаётся только
      сравнением ряда активности — соли у аналитика нет;
    - 2.1–2.2 под `ml_user`: `ml.v_ml_client_month` — данные для модели оттока;
-   - 3.1–3.3 под `ml_user`: фактическое k и журнал `ml.masking_log`;
-   - 4.1 под `ml_user`: `SELECT * FROM dwh.dim_client` → `ACCESS_DENIED`.
+   - 3.1–3.2 под `etl_user`: фактическое k и малые группы по `ml.dim_client`;
+   - 3.3 под `ml_user`: журнал `ml.masking_log`;
+   - 4.1–4.4 под `ml_user`: права только на `v_ml_client_month` и `masking_log`,
+     `dwh.dim_client`, `ml.dim_client`, `ml.fact_client_activity` → `ACCESS_DENIED`.
 4. Повторный **Trigger**: в `ml` те же 805 клиентов и 16 045 строк факта (без дублей),
-   псевдонимы те же, в `masking_log` ещё одна строка.
+   псевдонимы те же, в `masking_log` ещё одна строка. Псевдонимы сохраняются и после
+   `docker compose up -d --force-recreate airflow`.
 
 ## Структура
 
 ```
 docker-compose.yml        postgres + clickhouse + airflow (standalone, LocalExecutor)
-.env.example              пароли, K_MIN, MASKING_SALT
+.env.example              пароли, K_MIN, FERNET_KEY, MASKING_SALT
 clickhouse/initdb/        базы dwh, ml и пользователи etl_user, ml_user (RBAC)
 clickhouse/config/        уровень логов information (см. «Соль»)
 dags/mask_dwh_to_ml.py    DAG: только вызывает функции модулей
@@ -122,6 +129,8 @@ synthetic/                DDL слоя dwh и генератор синтети�
 masking/
   rules.yaml              правила по полям, квазиидентификаторы, справочники
   masker.py               сборка параметров, запуск SQL, статистика, журнал
+  init_salt.py            создание или проверка Variable masking_salt при старте Airflow
+  experiment.py           эксперимент K_MIN 3/5/10, квартал/полугодие
   db.py                   clickhouse-connect, выполнение SQL-файлов
   sql/ddl_ml.sql          таблицы ml, masking_log, v_ml_client_month
   sql/dwh_client_qi.sql   квазиидентификаторы и размер группы (общая формула)
@@ -129,6 +138,8 @@ masking/
   sql/copy_dims.sql
   sql/mask_fact.sql
   sql/validate_ml.sql     восемь проверок
+  sql/experiment_k.sql    клиенты dwh с КИ, числом строк факта и оттоком
+experiments/              результат эксперимента (md, csv)
 checks.sql                запросы для показа
 ```
 
@@ -136,7 +147,7 @@ checks.sql                запросы для показа
 
 | Поле `dwh.dim_client` | В `ml` | Как |
 |---|---|---|
-| `client_key` | `client_key` | первые 8 байт `SHA-256(соль ‖ ':' ‖ client_key)` в hex. Стабилен между запусками, без соли не восстанавливается |
+| `client_key` | `client_key` | первые 8 байт `SHA-256(соль ‖ ':' ‖ client_key)` в hex. Стабилен, пока не сменились соль и `FERNET_KEY`; без соли не восстанавливается |
 | `contact_name`, `hotel_name`, `inn` | — | не выбираются |
 | `email` | `email_masked` | `o***@gmail.com` |
 | `phone` | `phone_masked` | `+7 *** *** 13 51` |
@@ -158,8 +169,12 @@ checks.sql                запросы для показа
 ключ при той же соли всегда даёт тот же псевдоним — поэтому он стабилен между запусками.
 
 - берётся из `MASKING_SALT` в `.env`; если там пусто — генерируется при первом старте
-  (64 hex-символа). Хранится как Airflow Variable `masking_salt` в Postgres Airflow;
+  (64 hex-символа, `masking/init_salt.py`). Хранится как Airflow Variable `masking_salt`
+  в Postgres Airflow (volume `pg_data`), зашифрована Fernet-ключом `FERNET_KEY` из `.env`;
   `.env` в `.gitignore`, в git, SQL-файлах и `ml` соли нет;
+- если Variable есть, но не расшифровывается текущим `FERNET_KEY`, контейнер Airflow
+  не стартует и пишет `ОШИБКА: Variable masking_salt есть в базе Airflow, но не
+  расшифровывается текущим FERNET_KEY…`. Новая соль в этом случае не создаётся;
 - в ClickHouse передаётся параметром запроса `{salt:String}`;
 - ClickHouse по умолчанию записывает в журнал `system.query_log` текст запроса
   с уже подставленными значениями параметров — соль оказывалась бы там в открытом
@@ -169,8 +184,13 @@ checks.sql                запросы для показа
 - `validate_ml` соль не использует.
 
 Проверено: после запуска DAG соли нет в логах задач, логах контейнеров,
-`system.query_log` и таблицах `ml`. Пересоздать соль (псевдонимы сменятся):
-`docker compose down -v`.
+`system.query_log` и таблицах `ml`.
+
+Стабильность псевдонима. Псевдоним не меняется, пока сохраняются volume `pg_data`
+и `FERNET_KEY` в `.env`: перезапуск DAG, `docker compose restart`, `docker compose up -d
+--force-recreate airflow` его не меняют (проверено по MD5 отсортированного списка
+псевдонимов). Сменить соль (псевдонимы сменятся): `docker compose down -v` либо
+новое значение `MASKING_SALT` в `.env`.
 
 **Почему SHA-256, а не «простой» хэш.** Замер на стенде, 10 млн строк:
 SHA-256 — 1,3 с, `sipHash64` — 0,33 с, `cityHash64` — 0,14 с. У нас ~20 тыс. строк,
@@ -188,6 +208,39 @@ SHA-256 — 1,3 с, `sipHash64` — 0,33 с, `cityHash64` — 0,14 с. У нас
 При `K_MIN = 5` подавляется 195 клиентов из 1000 (3 883 строки факта), в `ml`
 остаётся 805 клиентов в 65 группах, фактическое k = 5. Подавление в основном
 касается малых округов и редких сочетаний «крупный отель + поздний квартал».
+
+Эксперимент для оценки достаточности: `K_MIN` 3, 5, 10 и обобщение `connected_quarter`
+до полугодия. Считается по `dwh` той же формулой КИ, `ml` и DAG не меняет:
+
+```bash
+docker compose exec -T airflow python -m masking.experiment md > experiments/k_min_experiment.md
+```
+
+```bash
+docker compose exec -T airflow python -m masking.experiment csv > experiments/k_min_experiment.csv
+```
+
+| | квартал, 3 | квартал, 5 | квартал, 10 | полугодие, 3 | полугодие, 5 | полугодие, 10 |
+|---|---|---|---|---|---|---|
+| групп в ml | 96 | 65 | 36 | 66 | 55 | 34 |
+| подавлено клиентов | 8,7 % | 19,5 % | 38,0 % | 2,6 % | 6,2 % | 20,0 % |
+| подавлено строк факта | 8,2 % | 19,5 % | 37,5 % | 2,4 % | 5,8 % | 20,3 % |
+| доля ушедших клиентов (в dwh 26,9 %) | 26,7 % | 27,7 % | 27,7 % | 26,8 % | 26,9 % | 27,4 % |
+
+Распределение по округам и `rooms_range` — в `experiments/k_min_experiment.md`.
+
+## Права в ClickHouse
+
+| Пользователь | Права |
+|---|---|
+| `etl_user` | `ALL` на `dwh.*` и `ml.*` (Airflow) |
+| `ml_user` | `SELECT` только на `ml.v_ml_client_month` и `ml.masking_log` |
+
+Представление создано с `SQL SECURITY DEFINER` (определитель — `etl_user`): без этого
+ClickHouse проверяет права вызывающего на `ml.fact_client_activity`, `ml.dim_client`
+и т. д., и `ml_user` получает `ACCESS_DENIED` даже на представлении (проверено).
+Права выдаются в `clickhouse/initdb/01_users.sh` при первом старте ClickHouse,
+то есть применяются только к новому volume (`docker compose down -v`).
 
 ## Проверки `validate_ml`
 

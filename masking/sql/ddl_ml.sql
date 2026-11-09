@@ -66,7 +66,9 @@ CREATE TABLE IF NOT EXISTS ml.masking_log
 ENGINE = MergeTree ORDER BY logged_at
 COMMENT 'Журнал запусков маскирования';
 
-CREATE OR REPLACE VIEW ml.v_ml_client_month AS
+CREATE OR REPLACE VIEW ml.v_ml_client_month
+DEFINER = CURRENT_USER SQL SECURITY DEFINER
+AS
 SELECT
     f.client_key AS client_key,
     f.date_key AS date_key,

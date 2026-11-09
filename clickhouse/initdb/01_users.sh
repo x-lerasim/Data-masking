@@ -9,5 +9,6 @@ GRANT ALL ON dwh.* TO etl_user;
 GRANT ALL ON ml.*  TO etl_user;
 
 CREATE USER IF NOT EXISTS ml_user IDENTIFIED WITH sha256_password BY '${ML_USER_PASSWORD}';
-GRANT SELECT ON ml.* TO ml_user;
+GRANT SELECT ON ml.v_ml_client_month TO ml_user;
+GRANT SELECT ON ml.masking_log TO ml_user;
 SQL

@@ -7,6 +7,7 @@ x-airflow-env: &airflow-env
   AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "False"
   AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "True"
   AIRFLOW__CORE__SENSITIVE_VAR_CONN_NAMES: "salt"
+  AIRFLOW__CORE__FERNET_KEY: ${FERNET_KEY:?нет .env}
   _PIP_ADDITIONAL_REQUIREMENTS: clickhouse-connect==1.12.0
   PYTHONPATH: /opt/airflow/project
   AIRFLOW_VAR_K_MIN: ${K_MIN:?нет .env}
@@ -54,12 +55,9 @@ services:
       - bash
       - -c
       - |
+        set -e
         airflow db migrate > /dev/null
-        if [ -n "$$MASKING_SALT" ]; then
-          airflow variables set masking_salt "$$MASKING_SALT" > /dev/null
-        elif ! airflow variables get masking_salt > /dev/null 2>&1; then
-          airflow variables set masking_salt "$$(python -c 'import secrets; print(secrets.token_hex(32))')" > /dev/null
-        fi
+        python -m masking.init_salt
         unset MASKING_SALT
         exec airflow standalone
     environment:

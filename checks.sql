@@ -59,10 +59,11 @@ GROUP BY federal_district
 ORDER BY clients DESC;
 
 ------------------------------------------------------------------------------
--- 3. Фактическое k                               (пользователь: ml_user)
+-- 3. Фактическое k и журнал
 ------------------------------------------------------------------------------
 
 -- 3.1 минимальный размер группы по квазиидентификаторам (считается по клиентам)
+--     пользователь: etl_user (у ml_user нет доступа к ml.dim_client)
 SELECT min(clients) AS k_actual, count() AS groups, sum(clients) AS clients_total
 FROM
 (
@@ -71,22 +72,31 @@ FROM
     GROUP BY federal_district, rooms_range, connected_quarter
 );
 
--- 3.2 самые маленькие группы
+-- 3.2 самые маленькие группы                    (пользователь: etl_user)
 SELECT federal_district, rooms_range, connected_quarter, count() AS clients
 FROM ml.dim_client
 GROUP BY federal_district, rooms_range, connected_quarter
 ORDER BY clients, federal_district
 LIMIT 10;
 
--- 3.3 журнал запусков маскирования
+-- 3.3 журнал запусков маскирования               (пользователь: ml_user)
 SELECT run_id, logged_at, dim_client_read, dim_client_written, fact_read, fact_written,
        suppressed_clients, suppressed_fact_rows, k_min, k_actual, checks_status
 FROM ml.masking_log
 ORDER BY logged_at DESC;
 
 ------------------------------------------------------------------------------
--- 4. ml_user не видит dwh                        (пользователь: ml_user)
+-- 4. Права ml_user: только v_ml_client_month и masking_log   (пользователь: ml_user)
 ------------------------------------------------------------------------------
 
--- 4.1 ожидается ошибка ACCESS_DENIED (Code: 497)
+-- 4.1 какие права выданы
+SHOW GRANTS;
+
+-- 4.2 ожидается ошибка ACCESS_DENIED (Code: 497)
 SELECT * FROM dwh.dim_client LIMIT 5;
+
+-- 4.3 ожидается ошибка ACCESS_DENIED (Code: 497)
+SELECT * FROM ml.dim_client LIMIT 5;
+
+-- 4.4 ожидается ошибка ACCESS_DENIED (Code: 497)
+SELECT * FROM ml.fact_client_activity LIMIT 5;

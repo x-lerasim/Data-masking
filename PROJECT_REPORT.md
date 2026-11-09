@@ -1,38 +1,40 @@
 # Отчёт по проекту: обезличивание персональных данных между двумя слоями ClickHouse
 
-Предмет: «ИИ для информационной безопасности». Репозиторий `x-lerasim/data-masking`, коммит `ab9a503`
-(код при подготовке отчёта не менялся). Дата запуска: 2026-11-09, время в UTC.
+Предмет: «ИИ для информационной безопасности». Репозиторий `x-lerasim/data-masking`, ветка
+`claude/tender-franklin-hlzwmq` (код в состоянии коммита с этим отчётом). Дата запуска: 2026-11-09, время в UTC.
 
 ## 0. Как получены цифры
 
-Все цифры ниже взяты из реального запуска 2026-11-09 на стенде из `docker-compose.yml`. Если число взято
-из кода или README, а не из запуска, это сказано рядом с ним.
+Все цифры ниже взяты из запуска 2026-11-09 на стенде из `docker-compose.yml` после правок, описанных
+в разделах 6.3, 7.3 и 8. Если число взято из кода или README, а не из запуска, это сказано рядом с ним.
+Если что-то не проверялось, это сказано явно (сводка в 13.3).
 
-Условия запуска (для воспроизводимости):
+Условия запуска:
 
-- Linux, 4 CPU, 15,7 GiB RAM, Docker 29.9.2, Docker Compose v5.6.1.
-- `.env` создан копированием `.env.example`. `MASKING_SALT` пустой, поэтому соль сгенерирована при старте.
-- Особенность стенда, к проекту не относится: исходящий HTTPS идёт через прокси с собственным CA, и
-  `pip` внутри контейнера Airflow сначала не смог поставить `clickhouse-connect` (`CERTIFICATE_VERIFY_FAILED`).
-  Чтобы это обойти, добавлен внешний override-файл, который монтирует CA-сертификат и задаёт `PIP_CERT`.
-  Он лежит вне репозитория, код проекта и `docker-compose.yml` не менялись. На обычной машине этот шаг не нужен.
+- Linux, 4 CPU, 15,7 GiB RAM, Docker 29.9.2, Docker Compose v5.6.1;
+- `.env` создан копированием `.env.example` (`K_MIN=5`, демонстрационный `FERNET_KEY`, `MASKING_SALT` пустой,
+  поэтому соль сгенерирована при первом старте);
+- перед запуском volumes пустые, то есть `clickhouse/initdb/01_users.sh` выполнился с новыми правами.
 
 Выполненные запуски DAG `mask_dwh_to_ml`:
 
 | № | run_id | Что проверялось | Итог |
 |---|---|---|---|
-| 1 | `manual__2026-11-09T11:22:22.783054+00:00` | основной запуск | success, PASSED |
-| 2 | `manual__2026-11-09T11:23:44.109631+00:00` | повторная запускаемость | success, PASSED |
-| – | без run_id, `masker.validate(5)` вручную | негативный тест (раздел 9) | 3 проверки FAIL |
-| 3 | `manual__2026-11-09T11:25:28.809184+00:00` | восстановление `ml` после негативного теста | success, PASSED |
-| 4 | `manual__2026-11-09T11:27:11.863311+00:00` | после пересоздания контейнера Airflow (раздел 13) | success, PASSED, **псевдонимы другие** |
+| 1 | `manual__2026-11-09T12:16:36.326553+00:00` | основной запуск | success, PASSED |
+| 2 | `manual__2026-11-09T12:17:28.663423+00:00` | повторная запускаемость | success, PASSED |
+| 3 | `manual__2026-11-09T12:18:22.043090+00:00` | после `docker compose up -d --force-recreate airflow` | success, PASSED, псевдонимы те же |
+| – | без запуска DAG | старт Airflow с чужим `FERNET_KEY` (раздел 6.3) | контейнер завершился с кодом 1 и сообщением об ошибке |
+| 4 | `manual__2026-11-09T12:20:17.955136+00:00` | после возврата прежнего `FERNET_KEY` | success, PASSED, псевдонимы те же |
+| – | без run_id, `masker.validate(5)` вручную | негативный тест проверок (раздел 9) | 3 проверки FAIL |
+| 5 | `manual__2026-11-09T12:20:44.612581+00:00` | восстановление `ml` после негативного теста | success, PASSED |
+| – | `python -m masking.experiment` | эксперимент K_MIN 3/5/10, квартал/полугодие (раздел 7.3) | таблицы в `experiments/` |
 
-Если не сказано иное, цифры относятся к запуску 1. Запуски 1–3 дали одинаковые результаты.
+Если не сказано иное, цифры относятся к запуску 1. Счётчики запусков 1–5 в `ml.masking_log` одинаковые.
 
 ## 1. Цель проекта и что в него не входит
 
 **Цель** (по README и коду): учебный демо-проект. SaaS для отелей хранит витрину активности клиентов
-с персональными данными (слой `dwh`). Нужно автоматически построить из неё обезличенную копию (слой `ml`),
+с персональными данными (слой `dwh`). Из неё автоматически строится обезличенная копия (слой `ml`),
 из которой модель прогноза оттока берёт данные. Обезличивание сочетает псевдонимизацию ключа с солью,
 удаление прямых идентификаторов, маскирование, обобщение квазиидентификаторов и подавление малых групп
 (k-анонимность). Результат проверяется автоматически, каждый запуск пишется в журнал. Доступ к слоям
@@ -40,17 +42,18 @@
 
 **Чего в проекте нет** (проверено по коду):
 
-- **Модели оттока нет.** Нет ни кода обучения, ни ML-библиотек, ни признаков сверх витрины `ml.v_ml_client_month`.
+- **Модели оттока нет.** Нет кода обучения, ML-библиотек и признаков сверх витрины `ml.v_ml_client_month`.
   Проект только готовит для неё данные.
-- **Реальных данных нет.** Все данные синтетические (`synthetic/generate.py`), и при каждом запуске DAG
+- **Реальных данных нет.** Все данные синтетические (`synthetic/generate.py`), при каждом запуске DAG
   слой `dwh` удаляется и создаётся заново.
 - Нет инкрементальной загрузки: каждый раз полная перезаливка (TRUNCATE + INSERT).
 - Нет TLS между компонентами: ClickHouse отвечает по HTTP на 8123.
 - Нет аутентификации в Airflow: `SIMPLE_AUTH_MANAGER_ALL_ADMINS=True`, вход без пароля.
-- Нет ротации соли, нет внешнего хранилища секретов (Vault и т. п.).
+- Нет ротации соли и внешнего хранилища секретов (Vault и т. п.).
 - Нет метрик l-разнообразия и t-близости, нет оценки риска по атрибутам факта.
 - Нет обезличивания по требованию госорганов (постановление № 1154), нет передачи данных третьим лицам.
 - Нет автотестов (pytest и т. п.) и CI. Проверки есть только в задаче `validate_ml`.
+- Нет локальных актов оператора (приказа об обезличивании, правил, перечней).
 - В коде нет комментариев: описание лежит в README.
 
 ## 2. Стек, файлы, ресурсы
@@ -63,7 +66,8 @@
 | Airflow | образ `apache/airflow:3.4.0-python3.12` | **3.4.0** (`/api/v2/version`), LocalExecutor, `airflow standalone` |
 | Python (в контейнере Airflow) | python3.12 | **3.12.16** |
 | PostgreSQL (метаданные Airflow) | `postgres:17-alpine` | **17.11** |
-| clickhouse-connect | `_PIP_ADDITIONAL_REQUIREMENTS: clickhouse-connect==1.12.0` | **1.12.0** (+ зависимости lz4 4.4.5, backports.zstd 1.8.0) |
+| clickhouse-connect | `_PIP_ADDITIONAL_REQUIREMENTS: clickhouse-connect==1.12.0` | **1.12.0** (+ lz4 4.4.5, backports.zstd 1.8.0) |
+| cryptography (Fernet) | не задан, из образа Airflow | 50.0.2 |
 | PyYAML | не задан, из образа Airflow | 6.0.3 |
 | pendulum | не задан, из образа Airflow | 3.3.0 |
 | psycopg2-binary | не задан, из образа Airflow | 2.9.13 |
@@ -74,11 +78,12 @@
 ### 2.2 Дерево файлов
 
 ```
-.env.example                  образец .env: K_MIN, пароли etl_user/ml_user/admin ClickHouse, MASKING_SALT
+.env.example                  образец .env: K_MIN, пароли etl_user/ml_user/admin ClickHouse, FERNET_KEY, MASKING_SALT
 .gitignore                    исключает .env, __pycache__, *.pyc, logs/
-README.md                     описание проекта, схемы, правила, сценарий показа
+README.md                     описание проекта, схемы, правила, права, эксперимент, сценарий показа
 docker-compose.yml            три сервиса; переменные из .env с ${VAR:?} (без .env compose не стартует);
-                              при старте airflow: db migrate, создание Variable masking_salt, airflow standalone
+                              AIRFLOW__CORE__FERNET_KEY из .env; при старте airflow: db migrate,
+                              python -m masking.init_salt, airflow standalone
 checks.sql                    запросы для показа в ClickHouse Play (разделы 1–4)
 clickhouse/initdb/01_users.sh при первом старте ClickHouse создаёт базы dwh, ml и пользователей etl_user, ml_user с правами
 clickhouse/config/logging.xml уровень серверного лога ClickHouse = information
@@ -90,34 +95,35 @@ masking/__init__.py           пустой
 masking/rules.yaml            правила по полям, квазиидентификаторы, диапазоны номеров, справочник город → федеральный округ
 masking/db.py                 подключение clickhouse-connect под etl_user; разбор SQL-файлов; отключение query_log для запросов с солью
 masking/masker.py             формула псевдонима, подстановка шаблонов в SQL, сверка схемы dwh с rules.yaml, статистика, validate, журнал
-masking/sql/ddl_ml.sql        CREATE IF NOT EXISTS таблиц ml, masking_log и CREATE OR REPLACE VIEW v_ml_client_month
+masking/init_salt.py          при старте Airflow: создать соль, взять сохранённую или упасть, если она не расшифровывается
+masking/experiment.py         эксперимент K_MIN 3/5/10 × квартал/полугодие; вывод в md или csv
+masking/sql/ddl_ml.sql        CREATE IF NOT EXISTS таблиц ml, masking_log; CREATE OR REPLACE VIEW v_ml_client_month (SQL SECURITY DEFINER)
 masking/sql/dwh_client_qi.sql обобщение квазиидентификаторов и размер группы (оконная функция); общий фрагмент для маскирования и проверок
 masking/sql/mask_dim_client.sql  TRUNCATE + INSERT ml.dim_client с псевдонимом, масками, обобщением, фильтром k
 masking/sql/copy_dims.sql     TRUNCATE + INSERT ml.dim_tariff, ml.dim_date (копия как есть)
 masking/sql/mask_fact.sql     TRUNCATE + INSERT ml.fact_client_activity с псевдонимом, без строк подавленных клиентов
 masking/sql/validate_ml.sql   восемь проверок; каждая возвращает ok и details
+masking/sql/experiment_k.sql  клиенты dwh с КИ (квартал и полугодие), числом строк факта и строк оттока
+experiments/k_min_experiment.md   результат эксперимента, таблицы
+experiments/k_min_experiment.csv  то же в длинном формате (scenario, metric, value)
 ```
 
-Всего в репозитории 1213 строк (`wc -l` по `git ls-files`).
+Без этого отчёта в репозитории 1676 строк (`wc -l` по всем файлам).
 
 ### 2.3 Требования к памяти и диску
 
-В репозитории требования к памяти **не указаны**: ни в README, ни в compose (лимитов `mem_limit` нет).
-Ниже то, что намерено на стенде (`docker stats`, сразу после запусков DAG):
+В репозитории требования к памяти **не указаны**: лимитов `mem_limit` в compose нет. Замер `docker stats`
+после запусков DAG:
 
 | Контейнер | RAM |
 |---|---|
-| airflow (standalone: api-server, scheduler, dag-processor, triggerer) | 1,37–1,52 GiB |
-| clickhouse | 260–293 MiB (`MemoryResident` ≈ 875 MiB) |
-| postgres | ≈ 65 MiB |
-| **Итого** | ≈ 1,9 GiB по `docker stats` |
+| airflow (standalone: api-server, scheduler, dag-processor, triggerer) | 1,49 GiB |
+| clickhouse | 249 MiB |
+| postgres | 65 MiB |
+| **Итого** | ≈ 1,8 GiB |
 
-Расхождение у ClickHouse: `docker stats` и внутренняя метрика `MemoryResident` считают память по-разному,
-чем именно объясняется разница, не исследовалось.
-
-Образы на диске: airflow 3,25 GB, clickhouse 1,2 GB, postgres 424 MB, итого ≈ 4,9 GB. Данные в ClickHouse:
-`dwh` ≈ 292 KiB, `ml` ≈ 219 KiB. На практике стенд работал на 15,7 GiB RAM, а минимальный объём памяти
-не проверялся.
+Образы на диске: airflow 3,25 GB, clickhouse 1,2 GB, postgres 424 MB, итого ≈ 4,9 GB. Данные в ClickHouse
+(`system.parts`): `dwh` 291,65 KiB, `ml` 214,53 KiB. Минимальный объём памяти не проверялся.
 
 ## 3. Архитектура
 
@@ -128,9 +134,9 @@ masking/sql/validate_ml.sql   восемь проверок; каждая воз
 | База | Комментарий в DDL | Содержимое | Кто имеет доступ |
 |---|---|---|---|
 | `dwh` | «Слой 1: витрина с персональными данными» | звезда с ПДн | `etl_user` (все права) |
-| `ml` | «Слой 2: обезличенная копия для ML» | обезличенная звезда, журнал, витрина | `etl_user` (все права), `ml_user` (только SELECT) |
+| `ml` | «Слой 2: обезличенная копия для ML» | обезличенная звезда, журнал, витрина | `etl_user` (все права), `ml_user` (SELECT только `v_ml_client_month` и `masking_log`) |
 
-Метаданные Airflow, включая Variable `masking_salt`, хранятся в отдельном Postgres.
+Метаданные Airflow, включая Variable `masking_salt`, хранятся в отдельном Postgres (volume `pg_data`).
 
 ### 3.2 Таблицы
 
@@ -163,9 +169,9 @@ generate_dwh ─► mask_dim_client ─► copy_dims ─► mask_fact ─► val
 `active_users`, `bookings_processed`, `features_used`, `tickets_count`, `late_payments`, `mrr`,
 `churn_flag` (целевая переменная). Масок `email_masked` и `phone_masked` в представлении нет.
 
-Модель должна читать данные под `ml_user`, у которого есть только `SELECT ON ml.*`. Самой модели и кода,
-который читает витрину, в репозитории нет (см. раздел 1). Учтите, что `ml_user` видит не только
-представление, а все объекты `ml`, включая `ml.dim_client` с масками (см. раздел 13).
+Модель читает данные под `ml_user`, у которого есть только `SELECT` на `ml.v_ml_client_month` и `ml.masking_log`.
+Таблицы `ml.dim_client` (с масками) и `ml.fact_client_activity` ему недоступны (раздел 8). Самой модели
+и кода, который читает витрину, в репозитории нет.
 
 ## 4. Схема слоёв и синтетика
 
@@ -215,9 +221,8 @@ ClickHouse не поддерживает PK/FK как ограничения. К
 
 **ml.dim_client**, `ORDER BY client_key`: `client_key String` (псевдоним), `email_masked String`,
 `phone_masked String`, `federal_district LowCardinality(String)`, `rooms_range LowCardinality(String)`,
-`connected_quarter LowCardinality(String)`.
-Расхождение с README: на схеме в README указан тип `String(16)`, в DDL просто `String`. Фактическая длина
-псевдонима во всех строках 16 символов.
+`connected_quarter LowCardinality(String)`. На схеме в README тип указан как `String(16)`, в DDL просто
+`String`; фактическая длина псевдонима во всех строках 16 символов.
 
 **ml.dim_tariff** и **ml.dim_date** по типам совпадают с `dwh`.
 
@@ -229,13 +234,14 @@ ClickHouse не поддерживает PK/FK как ограничения. К
 `suppressed_clients`, `suppressed_fact_rows`, `k_min`, `k_actual` (все UInt32),
 `checks_status LowCardinality(String)` (PASSED/FAILED), `checks_details String` (JSON).
 
-**ml.v_ml_client_month**: представление (VIEW), см. 3.4.
+**ml.v_ml_client_month**: представление (VIEW) с `DEFINER = CURRENT_USER SQL SECURITY DEFINER`.
+Создаётся задачей DAG под `etl_user`, поэтому `SHOW CREATE` показывает `DEFINER = etl_user SQL SECURITY DEFINER`.
 
 ### 4.3 Генерация синтетики (`synthetic/generate.py`)
 
 Параметры из кода:
 
-- `SEED = 20251101` (`random.Random`), то есть генерация детерминирована;
+- `SEED = 20251101` (`random.Random`), генерация детерминирована;
 - `N_CLIENTS = 1000`; окно с `WINDOW_START = 2024-11-01` на `N_MONTHS = 24` месяца (2024-11 … 2026-10);
 - 26 городов с весами (Москва 20, Санкт-Петербург 12, Сочи 9, Казань 5, …, Мурманск, Хабаровск,
   Кисловодск, Пятигорск по 1);
@@ -254,7 +260,7 @@ ClickHouse не поддерживает PK/FK как ограничения. К
   текущего тарифа. Ряд клиента начинается с месяца после подключения или с начала окна, если подключение
   было раньше.
 
-Фактический объём (запуск 1, лог задачи `generate_dwh` и запросы к ClickHouse):
+Фактический объём (запуск 1):
 
 | Таблица | Строк |
 |---|---|
@@ -265,8 +271,7 @@ ClickHouse не поддерживает PK/FK как ограничения. К
 
 Ещё по фактическим данным `dwh`:
 
-- строк факта на клиента: минимум 1, медиана 23, максимум 24, среднее 19,93;
-- диапазон `date_key`: 2024-11-01 … 2026-10-01; во всех 1000 клиентов есть строки факта;
+- строк факта на клиента: минимум 1, медиана 23, максимум 24, среднее 19,93; строки факта есть у всех 1000 клиентов;
 - ИНН: 638 десятизначных, 362 двенадцатизначных; email, телефоны и ИНН уникальны (по 1000);
   уникальных ФИО 519, названий отелей 139, городов 26;
 - `rooms_count` от 4 до 449; `connected_date` от 2024-01-01 до 2025-06-28.
@@ -288,16 +293,16 @@ ClickHouse не поддерживает PK/FK как ограничения. К
 
 | № | Задача | Что делает | Время, запуск 1 | Время, запуск 2 |
 |---|---|---|---|---|
-| 1 | `generate_dwh` | `synthetic.generate.generate()`: DROP + CREATE таблиц `dwh`, вставка синтетики, проверка сирот и зерна | 6,48 с | 1,41 с |
-| 2 | `mask_dim_client` | проверка соли, сверка колонок `dwh` с `rules.yaml` (`check_rules_cover_schema`), `ddl_ml.sql`, `mask_dim_client.sql`; статистика и фактическое k | 0,36 с | 0,40 с |
-| 3 | `copy_dims` | `copy_dims.sql`: TRUNCATE + копия `dim_tariff`, `dim_date` | 0,29 с | 0,30 с |
-| 4 | `mask_fact` | `mask_fact.sql`: TRUNCATE + факт с псевдонимом, без строк подавленных клиентов | 0,28 с | 0,32 с |
-| 5 | `validate_ml` | 8 проверок из `validate_ml.sql`; результат пишется в XCom `checks`; при любом FAIL задача падает | 0,41 с | 0,47 с |
-| 6 | `write_log` | `trigger_rule=ALL_DONE`; собирает статистику из XCom трёх задач и `checks`, пишет строку в `ml.masking_log`; падает, если статус FAILED | 0,79 с | 0,91 с |
+| 1 | `generate_dwh` | `synthetic.generate.generate()`: DROP + CREATE таблиц `dwh`, вставка синтетики, проверка сирот и зерна | 6,96 с | 1,10 с |
+| 2 | `mask_dim_client` | проверка соли, сверка колонок `dwh` с `rules.yaml` (`check_rules_cover_schema`), `ddl_ml.sql`, `mask_dim_client.sql`; статистика и фактическое k | 0,41 с | 0,42 с |
+| 3 | `copy_dims` | `copy_dims.sql`: TRUNCATE + копия `dim_tariff`, `dim_date` | 0,28 с | 0,28 с |
+| 4 | `mask_fact` | `mask_fact.sql`: TRUNCATE + факт с псевдонимом, без строк подавленных клиентов | 0,33 с | 0,35 с |
+| 5 | `validate_ml` | 8 проверок из `validate_ml.sql`; результат пишется в XCom `checks`; при любом FAIL задача падает | 0,48 с | 0,57 с |
+| 6 | `write_log` | `trigger_rule=ALL_DONE`; собирает статистику из XCom трёх задач и `checks`, пишет строку в `ml.masking_log`; падает, если статус FAILED | 0,81 с | 0,83 с |
 
-Время задачи считается от `start_date` до `end_date` экземпляра задачи. Весь запуск 1 длился 13,08 с
-(11:22:23.42 → 11:22:36.50), запуск 2 занял 8,13 с. Почему `generate_dwh` в первом запуске шёл дольше,
-не исследовалось.
+Время задачи считается от `start_date` до `end_date` экземпляра задачи. Весь запуск длился: 1 — 12,33 с,
+2 — 7,44 с, 3 — 12,42 с, 4 — 13,16 с, 5 — 7,46 с. `generate_dwh` занимал 6,65–6,96 с в запусках 1, 3, 4
+(первые после старта контейнера Airflow) и 1,10–1,11 с в запусках 2 и 5. Причина разницы не исследовалась.
 
 **Повторная запускаемость** (по коду):
 
@@ -309,10 +314,10 @@ ClickHouse не поддерживает PK/FK как ограничения. К
 - `ml.masking_log` не очищается и копит по строке на каждый запуск;
 - `max_active_runs=1` не даёт двум запускам выполняться одновременно.
 
-Подтверждено запуском 2: в `ml` снова 805 клиентов и 16 045 строк факта, дублей по
-`(client_key, date_key)` 0, MD5 отсортированного списка псевдонимов совпал с запуском 1
-(`1ecf06dd…`), в `masking_log` добавилась вторая строка.
-**Оговорка:** стабильность сохраняется, только пока жив контейнер Airflow (см. раздел 13).
+Подтверждено запусками: во всех пяти в `ml` 805 клиентов и 16 045 строк факта. MD5 отсортированного списка
+псевдонимов (`hex(MD5(arrayStringConcat(arraySort(groupArray(client_key)), ',')))`) после запусков 1, 2, 3
+и 4 одинаковый: `0B0A0228548F721F907AFEB8D5751DD7`. Запуск 3 шёл после пересоздания контейнера Airflow,
+запуск 4 после старта с восстановленным `FERNET_KEY` (раздел 6.3). В `masking_log` после всех запусков пять строк.
 
 ## 6. Правила маскирования
 
@@ -355,44 +360,65 @@ pseudo = lower(hex( first_8_bytes( SHA256( salt || ':' || toString(client_key) )
 - Результат: 16 hex-символов, то есть 64 бита. Коллизий в запуске 1 нет: 805 строк, 805 уникальных значений.
 - Одинаковый `client_key` при той же соли всегда даёт тот же псевдоним, поэтому факт соединяется
   с измерением в `ml` без исходного ключа.
-- Без соли перебрать 1000 исходных ключей бесполезно. Если соль известна, перебор 1000 ключей обращает
-  псевдоним сразу (см. раздел 13).
-- Почему SHA-256: в README приведён замер «на стенде» на 10 млн строк (SHA-256 1,3 с, `sipHash64` 0,33 с,
+- Без соли перебор 1000 исходных ключей бесполезен. Если соль известна, перебор 1000 ключей обращает
+  псевдоним сразу (раздел 13).
+- Отдельной таблицы соответствия «ключ → псевдоним» нет. Роль ключа сопоставления выполняет соль вместе
+  с формулой: зная их, соответствие вычисляется заново (раздел 12).
+- Почему SHA-256: в README приведён замер на 10 млн строк (SHA-256 1,3 с, `sipHash64` 0,33 с,
   `cityHash64` 0,14 с). **В этом запуске он не повторялся**, это цифры из README.
 
-### 6.3 Где хранится соль и как она не попадает в SQL, логи и git
+### 6.3 Где хранится соль и как обеспечена её устойчивость
 
-По коду и конфигурации:
+1. **Источник.** `MASKING_SALT` в `.env`. При старте контейнера Airflow выполняется `python -m masking.init_salt`
+   (`docker-compose.yml`, `command`, под `set -e`):
+   - `MASKING_SALT` задан → он записывается в Variable `masking_salt`;
+   - Variable нет → генерируется `secrets.token_hex(32)` (64 hex-символа);
+   - Variable есть и расшифровывается → используется она;
+   - Variable есть, но не расшифровывается → процесс завершается с кодом 1, Airflow не стартует, новая соль
+     не создаётся.
 
-1. **Источник.** `MASKING_SALT` в `.env`. Если переменная пустая, при старте контейнера Airflow генерируется
-   `secrets.token_hex(32)` (64 hex-символа) (`docker-compose.yml`, `command`). В этом запуске переменная
-   была пустой, соль сгенерирована, длина 64.
-2. **Хранение.** Airflow Variable `masking_salt` в базе метаданных Postgres. В таблице `variable` стоит
-   `is_encrypted = t`, то есть значение зашифровано Fernet. Ключ Fernet лежит в `/opt/airflow/airflow.cfg`
-   внутри контейнера, этот путь **не вынесен в volume** (последствия в разделе 13). После записи
-   Variable shell выполняет `unset MASKING_SALT`, но в `docker inspect` переменная видна в окружении
-   контейнера. В этом запуске она была пустой, потому что значение не задавалось.
-3. **git.** `.env` указан в `.gitignore`. Поиск значения соли по рабочей копии без `.git` нашёл 0 файлов.
-4. **SQL-файлы.** Соль передаётся только как параметр `{salt:String}` (`PSEUDO_KEY` в `masker.py`)
-   через `parameters=` в clickhouse-connect. В текстах SQL её нет.
-5. **system.query_log ClickHouse.** Для запросов с параметром `salt` `db.run_sql` выставляет
-   `log_queries=0, log_query_threads=0, log_query_views=0`. Проверено после `SYSTEM FLUSH LOGS`:
-   строк `query_log` со значением соли 0. Запросов маскирования с `SHA256` в `query_log` тоже нет:
-   нашлись только два `CREATE USER … sha256_password` из initdb, и пароли в них ClickHouse скрыл.
-   От `etl_user` за период запусков в журнале 187 записей `QueryFinish`, то есть остальные запросы
-   логируются как обычно.
-6. **Логи сервера ClickHouse.** Уровень `information` (`clickhouse/config/logging.xml`). Поиск соли
-   в `/var/log/clickhouse-server/` дал 0 файлов, в `system.text_log` 0 строк.
-7. **Логи Airflow.** `AIRFLOW__CORE__SENSITIVE_VAR_CONN_NAMES=salt`, поэтому Variable с `salt` в имени
-   маскируется в логах задач. Поиск соли по `/opt/airflow/logs` дал 0 файлов. В `docker compose logs`
-   всех трёх сервисов 0 совпадений.
-8. **Таблицы ml.** В `ml.masking_log.checks_details` и `ml.dim_client` соли нет (0 совпадений).
-   Задача `validate_ml` соль не использует.
+   В этом запуске `MASKING_SALT` был пустым, соль сгенерирована (`masking_salt: создана новая соль` в логе),
+   длина 64.
+2. **Хранение.** Airflow Variable `masking_salt` в базе метаданных Postgres (volume `pg_data`), в таблице
+   `variable` `is_encrypted = t`. Ключ Fernet задаётся `AIRFLOW__CORE__FERNET_KEY` из `FERNET_KEY` в `.env`
+   (`${FERNET_KEY:?нет .env}`, без него compose не стартует). До правок ключ генерировался внутри контейнера
+   в `airflow.cfg` и терялся при пересоздании контейнера, из-за чего соль не расшифровывалась и заменялась новой.
+3. **Проверка устойчивости.**
+   - `docker compose up -d --force-recreate airflow` после запуска 2: в логе `masking_salt: используется
+     сохранённая соль`, SHA-256 значения Variable до и после совпал, MD5 списка псевдонимов после запуска 3
+     тот же `0B0A0228…`;
+   - в `.env` подставлен другой `FERNET_KEY`, затем `--force-recreate airflow`: контейнер завершился
+     (`Exited (1)`), в логе:
+     ```
+     [error] Can't decrypt _val for key=masking_salt, invalid token or value
+     ОШИБКА: Variable masking_salt есть в базе Airflow, но не расшифровывается текущим FERNET_KEY.
+     Новая соль не создаётся, иначе сменятся все псевдонимы. Верните в .env прежний FERNET_KEY
+     или удалите данные (docker compose down -v).
+     ```
+   - прежний `FERNET_KEY` возвращён, `docker compose up -d airflow`: `используется сохранённая соль`,
+     MD5 псевдонимов после запуска 4 тот же.
+4. **git.** `.env` указан в `.gitignore`. Поиск значения соли по рабочей копии без `.git` нашёл 0 файлов.
+5. **SQL-файлы.** Соль передаётся только как параметр `{salt:String}` через `parameters=` в clickhouse-connect.
+   В текстах SQL её нет.
+6. **system.query_log ClickHouse.** Для запросов с параметром `salt` `db.run_sql` выставляет
+   `log_queries=0, log_query_threads=0, log_query_views=0`. После `SYSTEM FLUSH LOGS` в `query_log`
+   3968 записей, значение соли не найдено ни в одной (поиск выполнялся по выгрузке текста запросов
+   вне ClickHouse, чтобы сам поиск не попал в журнал). Запросов с `SHA256(concat` в журнале 0.
+   От `etl_user` в журнале 468 записей `QueryFinish`, то есть остальные запросы логируются.
+7. **Логи сервера ClickHouse.** Уровень `information` (`clickhouse/config/logging.xml`). Соль
+   в `/var/log/clickhouse-server/` и `system.text_log`: 0 совпадений.
+8. **Логи Airflow.** `AIRFLOW__CORE__SENSITIVE_VAR_CONN_NAMES=salt`. Соль в `/opt/airflow/logs`: 0 файлов;
+   в `docker compose logs` всех трёх сервисов: 0 совпадений.
+9. **Таблицы ml.** В `ml.masking_log.checks_details` соли нет. Задача `validate_ml` соль не использует.
+10. **Окружение контейнера.** `docker inspect`: `MASKING_SALT` пустой, `AIRFLOW__CORE__FERNET_KEY` задан
+    и виден в окружении контейнера (раздел 13.2).
 
-Что не проверялось: показывает ли UI или REST API Airflow значение Variable `masking_salt`. Проверено
-только, что CLI `airflow variables get masking_salt` внутри контейнера возвращает его в открытом виде.
+Не проверялось: показывает ли UI или REST API Airflow значение Variable `masking_salt`. CLI
+`airflow variables get masking_salt` внутри контейнера возвращает его в открытом виде.
 
 ## 7. k-анонимность
+
+### 7.1 Параметры
 
 - **K_MIN = 5.** Источник: `.env` (`K_MIN=5`, как в `.env.example`) → `AIRFLOW_VAR_K_MIN` → Variable `k_min`.
   Значение по умолчанию в коде (`_k_min`) тоже 5.
@@ -400,13 +426,11 @@ pseudo = lower(hex( first_8_bytes( SHA256( salt || ':' || toString(client_key) )
   (`rules.yaml`, `k_anonymity.quasi_identifiers`, действие `on_violation: suppress`).
 - **Расчёт по клиентам**, а не по строкам факта: в `dwh_client_qi.sql` считается
   `count() OVER (PARTITION BY federal_district, rooms_range, connected_quarter) AS group_size` по строкам
-  `dwh.dim_client`, одна строка на клиента. Фактическое k в `ml`: `min(count())` по группам `ml.dim_client`
-  (`masker.mask_dim_client`, проверка `k_anonymity`).
-- **Подавленные клиенты** (`group_size < K_MIN`) целиком не попадают в `ml.dim_client`, и **все их строки
-  факта** тоже не попадают в `ml.fact_client_activity`. Других вариантов (переобобщения, слияния групп)
-  в коде нет.
+  `dwh.dim_client`. Фактическое k в `ml`: `min(count())` по группам `ml.dim_client`.
+- **Подавленные клиенты** (`group_size < K_MIN`) целиком не попадают в `ml.dim_client`, и все их строки
+  факта тоже не попадают в `ml.fact_client_activity`. Переобобщения и слияния групп в DAG нет.
 
-Результат запуска 1:
+### 7.2 Результат основного сценария (K_MIN = 5, квартал)
 
 | Показатель | Значение |
 |---|---|
@@ -424,74 +448,103 @@ pseudo = lower(hex( first_8_bytes( SHA256( salt || ':' || toString(client_key) )
 Размеры групп в `ml`: размер (число групп) 5 (9), 6 (7), 7 (8), 8 (3), 9 (2), 10 (1), 11 (5), 12 (6),
 13 (1), 14 (6), 15 (1), 17 (1), 18 (1), 19 (3), 20 (1), 21 (2), 23 (1), 24 (4), 29 (1), 30 (1), 39 (1).
 
-Как подавление меняет распределение клиентов (dwh → ml):
+Распределение `connected_quarter` (dwh → ml): 2024-Q1 210 → 174, 2024-Q2 219 → 186, 2024-Q3 183 → 152,
+2024-Q4 151 → 112, 2025-Q1 139 → 115, 2025-Q2 98 → 66. Распределения по округам и `rooms_range` приведены
+в 7.3 (столбец «квартал, K_MIN=5»).
 
-| Федеральный округ | dwh | ml |
-|---|---|---|
-| Центральный | 363 | 357 |
-| Южный | 210 | 186 |
-| Северо-Западный | 184 | 160 |
-| Приволжский | 114 | 81 |
-| Уральский | 43 | 5 |
-| Сибирский | 34 | 10 |
-| Дальневосточный | 31 | 6 |
-| Северо-Кавказский | 21 | **0** |
+### 7.3 Эксперимент для оценки достаточности
 
-| rooms_range | dwh | ml | | connected_quarter | dwh | ml |
+Скрипт `masking/experiment.py` (SQL `masking/sql/experiment_k.sql`) считает сценарии по `dwh` той же
+формулой КИ, что и DAG. Вариант «полугодие» заменяет `connected_quarter` на `ГГГГ-H1/H2`
+(`intDiv(toQuarter(connected_date) + 1, 2)`). DAG и таблицы `ml` скрипт не меняет. Результат сохранён
+в `experiments/k_min_experiment.md` и `experiments/k_min_experiment.csv`. Сценарий «квартал, K_MIN=5»
+совпал с фактом DAG (805 клиентов, 16 045 строк, 65 групп), что подтверждает одинаковость формулы.
+
+Основные показатели:
+
+| Показатель | квартал, 3 | **квартал, 5** | квартал, 10 | полугодие, 3 | полугодие, 5 | полугодие, 10 |
 |---|---|---|---|---|---|---|
-| до 20 | 429 | 376 | | 2024-Q1 | 210 | 174 |
-| 21–50 | 334 | 289 | | 2024-Q2 | 219 | 186 |
-| 51–100 | 157 | 104 | | 2024-Q3 | 183 | 152 |
-| 100+ | 80 | 36 | | 2024-Q4 | 151 | 112 |
-| | | | | 2025-Q1 | 139 | 115 |
-| | | | | 2025-Q2 | 98 | 66 |
+| Групп по КИ в dwh | 155 | 155 | 155 | 85 | 85 | 85 |
+| Групп в ml | 96 | 65 | 36 | 66 | 55 | 34 |
+| Фактическое k | 3 | 5 | 10 | 3 | 5 | 10 |
+| Клиентов в ml | 913 | 805 | 620 | 974 | 938 | 800 |
+| Подавлено клиентов | 87 (8,7 %) | 195 (19,5 %) | 380 (38,0 %) | 26 (2,6 %) | 62 (6,2 %) | 200 (20,0 %) |
+| Строк факта в ml | 18 285 | 16 045 | 12 452 | 19 448 | 18 774 | 15 876 |
+| Подавлено строк факта | 1 643 (8,2 %) | 3 883 (19,5 %) | 7 476 (37,5 %) | 480 (2,4 %) | 1 154 (5,8 %) | 4 052 (20,3 %) |
+| Доля ушедших клиентов: dwh → ml | 26,9 → 26,7 % | 26,9 → 27,7 % | 26,9 → 27,7 % | 26,9 → 26,8 % | 26,9 → 26,9 % | 26,9 → 27,4 % |
+| Доля строк `churn_flag=1`: dwh → ml | 1,35 → 1,33 % | 1,35 → 1,39 % | 1,35 → 1,38 % | 1,35 → 1,34 % | 1,35 → 1,34 % | 1,35 → 1,38 % |
 
-Подавление неравномерно. Малые округа почти исчезают, Северо-Кавказский пропадает полностью, крупные отели
-(100+) теряют 55 %. Для модели оттока это смещение выборки.
+Клиентов по федеральным округам:
+
+| Округ | dwh | квартал, 3 | квартал, 5 | квартал, 10 | полугодие, 3 | полугодие, 5 | полугодие, 10 |
+|---|---|---|---|---|---|---|---|
+| Центральный | 363 | 361 | 357 | 313 | 363 | 363 | 363 |
+| Северо-Западный | 184 | 177 | 160 | 125 | 183 | 183 | 155 |
+| Южный | 210 | 204 | 186 | 141 | 210 | 206 | 193 |
+| Приволжский | 114 | 103 | 81 | 41 | 113 | 107 | 89 |
+| Уральский | 43 | 29 | 5 | 0 | 36 | 33 | 0 |
+| Сибирский | 34 | 14 | 10 | 0 | 25 | 19 | 0 |
+| Дальневосточный | 31 | 17 | 6 | 0 | 26 | 15 | 0 |
+| Северо-Кавказский | 21 | 8 | **0** | 0 | 18 | 12 | 0 |
+
+Клиентов по `rooms_range`:
+
+| rooms_range | dwh | квартал, 3 | квартал, 5 | квартал, 10 | полугодие, 3 | полугодие, 5 | полугодие, 10 |
+|---|---|---|---|---|---|---|---|
+| до 20 | 429 | 412 | 376 | 336 | 423 | 420 | 373 |
+| 21–50 | 334 | 313 | 289 | 242 | 331 | 314 | 288 |
+| 51–100 | 157 | 132 | 104 | 31 | 147 | 138 | 101 |
+| 100+ | 80 | 56 | 36 | 11 | 73 | 66 | 38 |
+
+Выводы по данным эксперимента:
+
+- при квартале рост K_MIN с 5 до 10 удваивает потери (19,5 % → 38,0 % клиентов) и полностью убирает
+  Уральский, Сибирский, Дальневосточный и Северо-Кавказский округа;
+- обобщение до полугодия при K_MIN=5 сокращает подавление с 19,5 % до 6,2 % клиентов, все восемь округов
+  остаются в данных, группа 100+ теряет 18 % клиентов вместо 55 %; ценой этого становится более грубая
+  дата подключения;
+- полугодие с K_MIN=10 по потерям (20,0 %) близко к основному сценарию, но четыре малых округа исчезают
+  полностью;
+- доля ушедших клиентов во всех сценариях остаётся в пределах 26,7–27,7 % при 26,9 % в `dwh`.
+  Это проверка только целевой переменной, влияние на качество модели не оценивалось.
+
+Основной сценарий DAG остаётся K_MIN=5, квартал. Переход на полугодие в DAG не выполнялся.
 
 ## 8. Разграничение доступа
 
-Пользователей создаёт `clickhouse/initdb/01_users.sh`, аутентификация `sha256_password`. Пароли берутся
-из `.env`, в отчёт они не включены.
+Пользователей создаёт `clickhouse/initdb/01_users.sh` при первом старте ClickHouse (пустой volume
+`ch_data`), аутентификация `sha256_password`. Пароли берутся из `.env`, в отчёт не включены.
 
 | Пользователь | Назначение | Права (`SHOW GRANTS`, фактически) |
 |---|---|---|
 | `admin` | администратор (`CLICKHOUSE_USER`, `CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1`) | все, управление доступом |
-| `etl_user` | Airflow: генерация, маскирование, проверки | `GRANT ALL ON dwh.*`, `GRANT ALL ON ml.*` (ClickHouse раскрывает их в полный список: SELECT, INSERT, ALTER, CREATE, DROP, TRUNCATE, …) |
-| `ml_user` | потребитель обезличенных данных (модель, аналитик) | `GRANT SELECT ON ml.* TO ml_user` |
+| `etl_user` | Airflow: генерация, маскирование, проверки | `GRANT ALL ON dwh.*`, `GRANT ALL ON ml.*` |
+| `ml_user` | потребитель обезличенных данных (модель, аналитик) | `GRANT SELECT ON ml.masking_log`, `GRANT SELECT ON ml.v_ml_client_month` |
 
-Реальный вывод под `ml_user` (`clickhouse-client`, запуск 1).
+**SQL SECURITY DEFINER.** В ClickHouse 26.8 обычное представление по умолчанию выполняется с правами
+вызывающего (`default_normal_view_sql_security = INVOKER`). Проверено: представление без `SQL SECURITY`,
+на которое выдан `SELECT` пользователю `ml_user`, возвращает
+`Code: 497 … necessary to have the grant SELECT ON ml.dim_client. (ACCESS_DENIED)`. Поэтому
+`ml.v_ml_client_month` создаётся с `DEFINER = CURRENT_USER SQL SECURITY DEFINER` и выполняется с правами
+`etl_user`.
 
-Обращение к исходному слою:
+Фактический вывод под `ml_user` (`clickhouse-client`, после запуска 1):
 
-```
-SELECT * FROM dwh.dim_client LIMIT 5
+| Запрос | Результат |
+|---|---|
+| `SHOW DATABASES` | `ml` |
+| `SHOW TABLES FROM ml` | `masking_log`, `v_ml_client_month` |
+| `SELECT count(), uniqExact(client_key), sum(churn_flag) FROM ml.v_ml_client_month` | 16045, 805, 223 |
+| `SELECT count() FROM ml.masking_log` | 1 |
+| `SELECT * FROM ml.dim_client LIMIT 1` | `Code: 497 … necessary to have the grant SELECT ON ml.dim_client. (ACCESS_DENIED)` |
+| `SELECT * FROM ml.fact_client_activity LIMIT 1` | `Code: 497 … SELECT ON ml.fact_client_activity. (ACCESS_DENIED)` |
+| `SELECT * FROM ml.dim_tariff LIMIT 1`, `ml.dim_date` | `Code: 497 … (ACCESS_DENIED)` |
+| `SELECT * FROM dwh.dim_client LIMIT 1` | `Code: 497 … SELECT ON dwh.dim_client. (ACCESS_DENIED)` |
+| `SELECT email_masked FROM ml.v_ml_client_month` | `Code: 47 … Unknown expression identifier email_masked` (колонки в представлении нет) |
+| `INSERT INTO ml.masking_log (run_id) VALUES ('x')` | `Code: 497 … INSERT(run_id) ON ml.masking_log. (ACCESS_DENIED)` |
 
-Received exception from server (version 26.8.36):
-Code: 497. DB::Exception: Received from localhost:9000. DB::Exception: ml_user: Not enough privileges.
-To execute this query, it's necessary to have the grant SELECT ON dwh.dim_client. (ACCESS_DENIED)
-```
-
-Обращение к обезличенному слою:
-
-```
-SELECT client_key, federal_district, rooms_range, connected_quarter FROM ml.dim_client ORDER BY client_key LIMIT 3
-
-   ┌─client_key───────┬─federal_district─┬─rooms_range─┬─connected_quarter─┐
-1. │ 0011a7272d13ff17 │ Центральный      │ до 20       │ 2025-Q2           │
-2. │ 00529f89aa8b5d81 │ Центральный      │ до 20       │ 2024-Q2           │
-3. │ 00a01c9f149c7c28 │ Центральный      │ 21–50       │ 2024-Q1           │
-   └──────────────────┴──────────────────┴─────────────┴───────────────────┘
-```
-
-Остальные проверки под `ml_user`:
-
-- `SHOW DATABASES` возвращает только `ml`;
-- `INSERT INTO ml.dim_client …` даёт `Code: 497 … necessary to have the grant INSERT(client_key) ON ml.dim_client. (ACCESS_DENIED)`;
-- `SELECT count() FROM system.query_log` даёт `Code: 497 … SELECT ON system.query_log. (ACCESS_DENIED)`.
-
-Ограничение: `ml_user` может читать все объекты `ml`, а не только `v_ml_client_month`. Это `ml.dim_client`
-с `email_masked`, `phone_masked` и `ml.masking_log`. Row policy и права на отдельные колонки не настроены.
+Запросы `checks.sql` к `ml.dim_client` (3.1, 3.2) и `ml.fact_client_activity` (1.3) выполняются под `etl_user`.
+Проверки отказа для `ml_user` вынесены в раздел 4 `checks.sql` (4.1–4.4).
 
 ## 9. Проверки `validate_ml`
 
@@ -510,10 +563,10 @@ SELECT client_key, federal_district, rooms_range, connected_quarter FROM ml.dim_
 | `no_pii` | в `ml.dim_client` нет исходных email, телефонов (исходный формат и только цифры), ИНН, ФИО, названий отелей; маски соответствуют шаблонам `^[^@][*][*][*]@[^@]+$` и `^[+]7 [*][*][*] [*][*][*] [0-9]{2} [0-9]{2}$`; в `ml` нет колонок `contact_name, email, phone, inn, hotel_name, city, rooms_count, connected_date` | строк с нарушением + PII-колонок > 0 | OK: строк с PII или неверной маской=0, PII-колонок=0 |
 | `k_anonymity` | фактическое k в `ml.dim_client` ≥ K_MIN | `k_actual < K_MIN` | OK: k=5, K_MIN=5 |
 
-В запусках 1–4 все восемь проверок OK, статус PASSED.
+В запусках 1–5 все восемь проверок OK, статус PASSED.
 
-**Негативный тест (выполнен).** В `ml.dim_client` вставлена строка клиента 1 с исходным ключом `'1'`
-и исходным email. Затем `masker.validate(5)` вызван вручную внутри контейнера Airflow:
+**Негативный тест (выполнен).** После запуска 4 в `ml.dim_client` вставлена строка клиента 1 с исходным
+ключом `'1'` и исходным email, затем `masker.validate(5)` вызван вручную внутри контейнера Airflow:
 
 ```
 FAIL clients_balance — dwh=1000, ml=806, подавлено=195
@@ -526,17 +579,18 @@ FAIL no_pii — строк с PII или неверной маской=1, PII-к
 OK   k_anonymity — k=5, K_MIN=5
 ```
 
-Это совпадает с README («падает на `clients_balance`, `no_source_keys`, `no_pii`»). Тест запускался
-не через DAG, поэтому в `masking_log` строки FAILED нет. Ветку `write_log` со статусом FAILED
-**через DAG не проверяли**. Слой `ml` восстановлен запуском 3.
+Результат совпадает с README («падает на `clients_balance`, `no_source_keys`, `no_pii`»). Тест запускался
+не через DAG, поэтому в `masking_log` строки FAILED нет; ветка `write_log` со статусом FAILED через DAG
+не проверялась. Слой `ml` восстановлен запуском 5.
 
 Чего проверки не покрывают: в `no_pii` проверяется только `ml.dim_client`, факт на PII не проверяется
-(PII-колонок в нём нет по DDL). Уникальность масок и рядов активности не проверяется (см. раздел 13).
+(PII-колонок в нём нет по DDL). Уникальность масок и рядов активности не проверяется (раздел 13).
+Права `ml_user` в `validate_ml` не проверяются, они проверены вручную (раздел 8).
 
 ## 10. Результаты запуска в цифрах
 
-**run_id:** `manual__2026-11-09T11:22:22.783054+00:00`. Состояние `success`,
-старт 11:22:23.421, конец 11:22:36.501 UTC (13,08 с). Время задач приведено в разделе 5.
+**run_id:** `manual__2026-11-09T12:16:36.326553+00:00`. Состояние `success`,
+старт 12:16:36.633, конец 12:16:48.965 UTC (12,33 с). Время задач приведено в разделе 5.
 
 | Таблица | Прочитано (dwh) | Записано (ml) | Не перенесено |
 |---|---|---|---|
@@ -548,36 +602,31 @@ OK   k_anonymity — k=5, K_MIN=5
 - Подавлено клиентов: **195 (19,5 %)**, строк факта: **3 883 (19,5 %)**.
 - Фактическое k: **5** при K_MIN = 5.
 - Группы в ml: **65**, размер мин / медиана / макс: **5 / 11 / 39**.
-- Витрина `ml.v_ml_client_month`: 16 045 строк, 805 псевдонимов, `sum(churn_flag)` = 223.
+- Витрина `ml.v_ml_client_month` под `ml_user`: 16 045 строк, 805 псевдонимов, `sum(churn_flag)` = 223.
 
-Содержимое `ml.masking_log` после запуска 1 (одна строка):
+Строки `ml.masking_log` после всех запусков:
 
-| Поле | Значение |
-|---|---|
-| run_id | manual__2026-11-09T11:22:22.783054+00:00 |
-| logged_at | 2026-11-09 11:22:35 |
-| dim_client_read / written | 1000 / 805 |
-| dim_tariff_read / written | 4 / 4 |
-| dim_date_read / written | 24 / 24 |
-| fact_read / written | 19928 / 16045 |
-| suppressed_clients | 195 |
-| suppressed_fact_rows | 3883 |
-| k_min / k_actual | 5 / 5 |
-| checks_status | PASSED |
-| checks_details | JSON-массив из 8 объектов `{check, description, ok, details}`; значения `details` совпадают с колонкой «Факт» в разделе 9 |
+| run_id | checks_status | written dim_client / fact | suppressed clients / fact | k_min / k_actual |
+|---|---|---|---|---|
+| manual__2026-11-09T12:16:36.326553+00:00 | PASSED | 805 / 16045 | 195 / 3883 | 5 / 5 |
+| manual__2026-11-09T12:17:28.663423+00:00 | PASSED | 805 / 16045 | 195 / 3883 | 5 / 5 |
+| manual__2026-11-09T12:18:22.043090+00:00 | PASSED | 805 / 16045 | 195 / 3883 | 5 / 5 |
+| manual__2026-11-09T12:20:17.955136+00:00 | PASSED | 805 / 16045 | 195 / 3883 | 5 / 5 |
+| manual__2026-11-09T12:20:44.612581+00:00 | PASSED | 805 / 16045 | 195 / 3883 | 5 / 5 |
 
-После всех запусков в журнале четыре строки (запуски 1–4), у всех одинаковые счётчики и статус PASSED.
+`checks_details` содержит JSON-массив из 8 объектов `{check, description, ok, details}`; значения `details`
+совпадают с колонкой «Факт» в разделе 9.
 
-Для сравнения со «Сценарием показа» в README: заявленные там 805 клиентов, 16 045 строк, 195 подавленных,
-3 883 строки и k = 5 совпали с фактом.
+Цифры «Сценария показа» README (805 клиентов, 16 045 строк, 195 подавленных, 3 883 строки, k = 5) совпали
+с фактом.
 
 ## 11. Примеры (синтетические данные)
 
 ### 11.1 До и после маскирования: dim_client
 
-Пять записей `dwh.dim_client` (клиенты 1–5) и соответствующие строки `ml.dim_client`. Сопоставление
-по вычисленному псевдониму сделано под `etl_user` с `log_queries=0`, псевдонимы из запусков 1–3
-(до пересоздания контейнера, см. раздел 13). Клиент 24 используется в `checks.sql`.
+Записи `dwh.dim_client` (клиенты 1–5 и 24) и соответствующие строки `ml.dim_client`. Сопоставление по
+вычисленному псевдониму выполнено под `etl_user` внутри контейнера Airflow с `log_queries=0`. Псевдонимы
+относятся к соли этого стенда (запуски 1–5). Клиент 24 используется в `checks.sql`.
 
 | client_key | contact_name | email | phone | inn | hotel_name | city | rooms | connected |
 |---|---|---|---|---|---|---|---|---|
@@ -592,75 +641,86 @@ OK   k_anonymity — k=5, K_MIN=5
 
 | (исх. ключ) | client_key (псевдоним) | email_masked | phone_masked | federal_district | rooms_range | connected_quarter |
 |---|---|---|---|---|---|---|
-| 1 | 261475fe8302b303 | v***@list.ru | +7 *** *** 46 42 | Центральный | 100+ | 2024-Q3 |
-| 2 | d71bbb0ccb41c089 | v***@list.ru | +7 *** *** 44 72 | Центральный | 21–50 | 2025-Q2 |
-| 3 | f6eaecd1a1d2b308 | y***@mail.ru | +7 *** *** 75 40 | Центральный | 21–50 | 2024-Q4 |
-| 4 | 4aa60f0060060ce7 | k***@mail.ru | +7 *** *** 76 18 | Центральный | 21–50 | 2025-Q1 |
-| 5 | 0fb72217eff114f0 | p***@yandex.ru | +7 *** *** 37 83 | Центральный | 51–100 | 2024-Q2 |
-| 24 | e891fbe5993a05fe | o***@gmail.com | +7 *** *** 13 51 | Южный | 21–50 | 2024-Q1 |
+| 1 | 127a923533b9cb46 | v***@list.ru | +7 *** *** 46 42 | Центральный | 100+ | 2024-Q3 |
+| 2 | 166600db574b0325 | v***@list.ru | +7 *** *** 44 72 | Центральный | 21–50 | 2025-Q2 |
+| 3 | 942061729c49beb9 | y***@mail.ru | +7 *** *** 75 40 | Центральный | 21–50 | 2024-Q4 |
+| 4 | c8ee2ca2bb20d18b | k***@mail.ru | +7 *** *** 76 18 | Центральный | 21–50 | 2025-Q1 |
+| 5 | 62882edfc952a106 | p***@yandex.ru | +7 *** *** 37 83 | Центральный | 51–100 | 2024-Q2 |
+| 24 | 8244e67e2c95c700 | o***@gmail.com | +7 *** *** 13 51 | Южный | 21–50 | 2024-Q1 |
 
 Колонка «исх. ключ» добавлена только для отчёта, в `ml` её нет. Примеры подавленных клиентов: 12
 (Санкт-Петербург, 270 номеров, 2024-05-02, 24 строки факта), 40 (Хабаровск, 20, 2025-02-10, 20 строк),
-44 (Новосибирск, 76, 2025-02-28, 12 строк). Ни их, ни их строк факта в `ml` нет: поиск по их псевдонимам
-в `ml.fact_client_activity` вернул 0.
+44 (Новосибирск, 76, 2025-02-28, 12 строк). Их псевдонимов нет ни в `ml.dim_client`, ни в `ml.fact_client_activity`.
 
 ### 11.2 Итоговая витрина для ML
 
-`SELECT * FROM ml.v_ml_client_month ORDER BY client_key, date_key LIMIT 5` под `ml_user`, запуск 3:
+`SELECT * FROM ml.v_ml_client_month ORDER BY client_key, date_key LIMIT 5` под `ml_user`:
 
 | client_key | date_key | year | quarter | month | federal_district | rooms_range | connected_quarter | tariff_key | tariff_name | tariff_price | logins_count | active_users | bookings_processed | features_used | tickets_count | late_payments | mrr | churn_flag |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 0011a7272d13ff17 | 2025-05-01 | 2025 | 2 | 5 | Центральный | до 20 | 2025-Q2 | 2 | Бизнес | 9900 | 12 | 1 | 8 | 9 | 4 | 0 | 9900 | 0 |
-| 0011a7272d13ff17 | 2025-06-01 | 2025 | 2 | 6 | Центральный | до 20 | 2025-Q2 | 2 | Бизнес | 9900 | 8 | 1 | 5 | 9 | 2 | 0 | 9900 | 0 |
-| 0011a7272d13ff17 | 2025-07-01 | 2025 | 3 | 7 | Центральный | до 20 | 2025-Q2 | 2 | Бизнес | 9900 | 13 | 1 | 6 | 10 | 1 | 1 | 9900 | 0 |
-| 0011a7272d13ff17 | 2025-08-01 | 2025 | 3 | 8 | Центральный | до 20 | 2025-Q2 | 2 | Бизнес | 9900 | 8 | 1 | 6 | 10 | 4 | 0 | 9900 | 0 |
-| 0011a7272d13ff17 | 2025-09-01 | 2025 | 3 | 9 | Центральный | до 20 | 2025-Q2 | 2 | Бизнес | 9900 | 8 | 1 | 8 | 10 | 3 | 1 | 9900 | 0 |
+| 005245c8dcb7931f | 2024-11-01 | 2024 | 4 | 11 | Северо-Западный | до 20 | 2024-Q1 | 2 | Бизнес | 9900 | 17 | 1 | 8 | 14 | 4 | 0 | 9900 | 0 |
+| 005245c8dcb7931f | 2024-12-01 | 2024 | 4 | 12 | Северо-Западный | до 20 | 2024-Q1 | 2 | Бизнес | 9900 | 17 | 1 | 12 | 14 | 3 | 0 | 9900 | 0 |
+| 005245c8dcb7931f | 2025-01-01 | 2025 | 1 | 1 | Северо-Западный | до 20 | 2024-Q1 | 2 | Бизнес | 9900 | 22 | 1 | 9 | 13 | 3 | 1 | 9900 | 0 |
+| 005245c8dcb7931f | 2025-02-01 | 2025 | 1 | 2 | Северо-Западный | до 20 | 2024-Q1 | 2 | Бизнес | 9900 | 14 | 1 | 16 | 13 | 2 | 0 | 9900 | 0 |
+| 005245c8dcb7931f | 2025-03-01 | 2025 | 1 | 3 | Северо-Западный | до 20 | 2024-Q1 | 2 | Бизнес | 9900 | 17 | 1 | 9 | 12 | 2 | 0 | 9900 | 0 |
 
-Отток по округам из витрины (запрос 2.2 из `checks.sql`): Центральный 357 клиентов / 91 ушёл (0,255),
-Южный 186 / 56 (0,301), Северо-Западный 160 / 44 (0,275), Приволжский 81 / 29 (0,358), Сибирский 10 / 0 (0),
-Дальневосточный 6 / 1 (0,167), Уральский 5 / 2 (0,4).
+Отток по округам из витрины под `ml_user` (запрос 2.2 из `checks.sql`): Центральный 357 клиентов / 91 ушёл
+(0,255), Южный 186 / 56 (0,301), Северо-Западный 160 / 44 (0,275), Приволжский 81 / 29 (0,358),
+Сибирский 10 / 0 (0), Дальневосточный 6 / 1 (0,167), Уральский 5 / 2 (0,4).
 
-## 12. Соответствие приказу Роскомнадзора от 19.06.2025 № 140
+## 12. Сопоставление с приказом Роскомнадзора № 140
 
-**Ограничение раздела.** Официальный текст приказа получить не удалось: сайты с текстом (consultant.ru,
-pravo.ppt.ru) недоступны из сети стенда. Поэтому **дословных формулировок из приказа здесь нет**.
-Использованы только вторичные источники, найденные поиском:
+**Источник:** приказ Роскомнадзора от 19.06.2025 № 140 «Об утверждении требований к обезличиванию
+персональных данных и методов обезличивания персональных данных, за исключением случаев, указанных
+в пункте 9.1 части 1 статьи 6 Федерального закона от 27 июля 2006 г. № 152-ФЗ "О персональных данных"»,
+зарегистрирован в Минюсте 31.07.2025 № 83110, вступил в силу 01.09.2025. Приказом признан утратившим
+силу приказ Роскомнадзора от 05.09.2013 № 996. Приложение № 1 содержит требования к обезличиванию,
+приложение № 2 — методы обезличивания.
 
-- приказ утверждает требования к обезличиванию и методы обезличивания, зарегистрирован в Минюсте 31.07.2025
-  № 83110, вступил в силу 01.09.2025 и отменил приказ РКН № 996 от 05.09.2013;
-- методы можно применять по одному или комбинировать;
-- в пересказах требований (1С:ИТС): заранее определить состав ПДн и субъектов, оценить достаточность метода,
-  обеспечить невозможность определить субъекта без дополнительной информации, исключить совместное хранение
-  обезличенного массива с исходным и дополнительной информацией, вести учёт действий по обезличиванию;
-- число методов источники называют по-разному (четыре или пять), их названия в найденных фрагментах
-  полностью не приведены.
+Данные в проекте синтетические, оператора и локальных актов нет. Поэтому ниже речь идёт о том, что
+проект спроектирован с учётом требований приказа, а не о соответствии приказу.
 
-Для статьи формулировки и номера пунктов нужно сверить с официальной публикацией
-(publication.pravo.gov.ru или КонсультантПлюс).
+### 12.1 Методы (приложение № 2)
 
-Сопоставление ниже составлено мной по общепринятым названиям методов (введение идентификаторов, изменение
-состава или семантики, декомпозиция, перемешивание; эти названия были в приказе № 996). Входят ли они
-в приказ № 140 в той же формулировке, **не проверено**.
+Пункт 1 приложения № 2 допускает применение методов из пунктов 2, 4, 10, 11 и 12 по отдельности или
+в совокупности. В проекте применяется сочетание метода введения идентификаторов (п. 2) и метода изменения
+состава или семантики (п. 4) в форме удаления (п. 6, 7) и изменения атрибутов (п. 9).
 
-| Поле / мера в проекте | Применённый метод (в проекте) | Предполагаемый метод по классификации РКН | Точность соответствия |
-|---|---|---|---|
-| client_key | замена на псевдоним SHA-256 с солью; «дополнительная информация» (соль) хранится отдельно, в Airflow | введение идентификаторов | вероятное; формулировка из № 140 не сверена. В классическом методе ведётся таблица соответствия, здесь её нет, сопоставление восстанавливается вычислением при известной соли |
-| contact_name, hotel_name, inn | удаление атрибутов | изменение состава (сокращение перечня обрабатываемых сведений) | вероятное; не сверено |
-| email, phone | частичное маскирование | изменение семантики / состава | не сверено; отдельного метода «маскирование» в известных мне формулировках нет |
-| city → федеральный округ, rooms_count → диапазон, connected_date → квартал | обобщение | изменение семантики (замена значения более общим) | вероятное; не сверено |
-| подавление групп < K_MIN | удаление записей | точного соответствия не найдено; k-анонимность как критерий в найденных пересказах не упоминается | **нет точного соответствия** |
-| dim_tariff, dim_date, показатели факта | без изменений | — | обезличивание не применялось |
-| — | декомпозиция, перемешивание | в проекте не применяются | — |
-
-Сопоставление с требованиями (по пересказу 1С, не по тексту приказа):
-
-| Требование (пересказ) | Что есть в проекте | Оценка |
+| Что в проекте | Пункт приказа | Комментарий |
 |---|---|---|
-| Определить состав ПДн до обезличивания | `rules.yaml` с правилом на каждое поле; `check_rules_cover_schema` не пропускает колонку без правила | реализовано технически; формального документа (перечня, акта) нет |
-| Оценить достаточность метода | проверки `validate_ml`, фактическое k | частично: не оценивается риск по атрибутам факта и по маскам (раздел 13) |
-| Невозможность определить субъекта без доп. информации | псевдоним без соли не обращается | частично: без соли возможна реидентификация через внешние данные (раздел 13) |
-| Раздельное хранение обезличенного и исходного массива и доп. информации | `dwh` и `ml` — разные базы с разными правами; соль в Postgres Airflow | частично: обе базы в одном экземпляре ClickHouse, `etl_user` имеет доступ к обеим |
-| Учёт действий по обезличиванию | `ml.masking_log`: строка на запуск со счётчиками и результатами проверок | реализовано для запусков DAG; ручные действия не журналируются |
+| `client_key` → псевдоним SHA-256 с солью | метод введения идентификаторов, п. 2; ключ, п. 3 | идентификатор «в виде кода… имеющего постоянное… значение, присваиваемый на основании заданных оператором алгоритмов». Ключом сопоставления служит соль вместе с формулой (12.3) |
+| удаление `contact_name`, `hotel_name`, `inn` | удаление атрибутов, пп. 5(1), 6, 7 | атрибуты, обработка которых не нужна для целей (модель оттока), исключаются из массива для всех субъектов (п. 6, 7) |
+| маски `email` и `phone` с заменой части значения на `*` | изменение атрибутов, п. 9(2) | «замены части значений атрибута персональных данных на знак "*"» |
+| `city` → округ, `rooms_count` → диапазон, `connected_date` → квартал | изменение атрибутов, п. 9(1) | «замены значений… обобщенными значениями… укрупнении значения атрибута персональных данных в пределах группы атрибутов» |
+| подавление групп меньше K_MIN | ближайшее: удаление атрибутов отдельных субъектов, п. 7 | п. 7 допускает удаление атрибутов, относящихся к отдельным субъектам. **k-анонимность в приказе прямо не названа**; порог K_MIN и критерий размера группы — решение проекта, а не требование приказа |
+| перемешивание (п. 10), декомпозиция (п. 11), преобразование массива (п. 12) | не применяются | k-анонимность (обобщение КИ до групп не меньше K_MIN) по смыслу близка к подпункту 1 п. 12 «обобщения (агрегации) атрибутов персональных данных субъектов». Это интерпретация, а не формулировка приказа |
+| искажение атрибутов, п. 5(2), п. 8; замена на случайные значения, п. 9(3) | не применяются | показатели факта переносятся без искажения |
+
+### 12.2 Требования (приложение № 1), фактическое состояние после правок
+
+| Пункт | Требование (кратко) | Что есть в проекте | Оценка |
+|---|---|---|---|
+| п. 1(1) | использование методов из приложения № 2 | методы из 12.1: пп. 2, 3, 5(1), 6, 7, 9(1), 9(2) | реализовано технически |
+| п. 1(2) | определение до обезличивания состава ПДн и субъектов | `rules.yaml`: правило на каждое поле каждой таблицы `dwh`; `check_rules_cover_schema` останавливает DAG до маскирования, если у колонки нет правила. Субъекты — все клиенты `dwh.dim_client` | реализовано технически; ветка с колонкой без правила негативным тестом не проверялась; формального перечня оператора нет |
+| п. 1(3) | оценка достаточности метода для целей обработки | `validate_ml` (8 проверок, включая фактическое k) и эксперимент 7.3: потери клиентов и строк факта, сдвиг распределений по округам и `rooms_range`, доля оттока для K_MIN 3/5/10 и квартала/полугодия | частично: оценка выполнена по КИ и целевой переменной; ряды активности в факте остаются уникальными (13.1 п. 2), их достаточность не оценивалась; влияние на качество модели не оценивалось |
+| п. 1(4) | невозможность определить субъекта без дополнительной информации | псевдоним без соли не обращается; прямые идентификаторы удалены; КИ обобщены, группы ≥ 5 | частично: уникальные ряды активности и почти уникальные маски телефона в `ml.dim_client` позволяют связать запись с внешним источником, где есть те же данные (13.1) |
+| п. 1(5) | безопасность и конфиденциальность ИС обезличивания | RBAC ClickHouse: `ml_user` видит только витрину и журнал; соль не попадает в `query_log`, логи, git (6.3) | частично: нет TLS (HTTP 8123), Airflow без аутентификации, порты 8080 и 8123 опубликованы на хосте |
+| п. 1(6) | исключение совместного хранения исходного и обезличенного массивов | `dwh` и `ml` — разные базы с разными правами | **не выполнено**: `dwh` и `ml` хранятся в одном экземпляре ClickHouse, `etl_user` имеет доступ к обоим. Это отличие прототипа от промышленного внедрения, где обезличенный массив выносится в отдельный экземпляр или хранилище; архитектура прототипа не менялась |
+| п. 1(7) | учёт действий по обезличиванию и операций с обезличенными данными | `ml.masking_log`: строка на каждый запуск DAG со счётчиками и результатами проверок | частично: учёт обезличивания есть для запусков DAG; операции с обезличенными данными (чтение `ml_user`) фиксируются только в `system.query_log` ClickHouse, отдельного журнала нет; ручные действия (как негативный тест в разделе 9) не журналируются |
+| п. 2 | локальные акты оператора (порядок обезличивания, правила изменения атрибутов, хранение актов отдельно) | — | не разрабатывались, вне рамок прототипа. `rules.yaml` описывает правила технически, но локальным актом не является |
+| прил. № 2, п. 3 | ключ сопоставления хранится отдельно от массива и не передаётся третьим лицам | соль хранится вне ClickHouse: Airflow Variable в Postgres, зашифрована Fernet-ключом из `.env` | частично (12.3) |
+
+### 12.3 Ключ сопоставления (приложение № 2, п. 3)
+
+Пункт 3 требует при введении идентификаторов создать ключ, позволяющий сопоставить идентификаторы
+и персональные данные, хранить его отдельно от массива и не передавать третьим лицам.
+
+В проекте отдельной таблицы соответствия «`client_key` → псевдоним» нет. Роль ключа выполняет соль
+вместе с формулой `SHA256(соль ‖ ':' ‖ client_key)`: при наличии соли и доступа к `dwh` соответствие
+вычисляется заново (так получены примеры в 11.1). Соль хранится вне ClickHouse: в базе метаданных Airflow
+(Postgres), зашифрована Fernet-ключом, который задаётся в `.env`. В `ml`, SQL-файлах, git и журналах её нет
+(6.3). Ограничения: демонстрационный `FERNET_KEY` лежит в `.env.example` в открытом репозитории,
+Airflow открыт без пароля, а `airflow variables get` в контейнере выдаёт соль открытым текстом (13.2).
 
 ## 13. Ограничения и слабые места
 
@@ -675,76 +735,80 @@ pravo.ppt.ru) недоступны из сети стенда. Поэтому **
    - пара (`email_masked`, `phone_masked`) уникальна у **всех 805**;
    - (квазиидентификаторы + `email_masked`) уникальны у 627 клиентов.
 
-   k-анонимность считается только по трём квазиидентификаторам, маски в расчёт не входят. Тот, у кого
-   есть телефоны клиентов (CRM, справочник), восстанавливает связь «псевдоним → клиент» для большинства
-   записей. Маски доступны `ml_user` (`SELECT ON ml.*`), хотя в `v_ml_client_month` их нет.
+   k-анонимность считается только по трём квазиидентификаторам, маски в расчёт не входят. После правок
+   маски недоступны `ml_user` (в `v_ml_client_month` их нет, `ml.dim_client` закрыта), но хранятся в `ml`
+   и доступны `etl_user` и администратору. Тот, у кого есть доступ к `ml.dim_client` и телефоны клиентов
+   из внешнего источника, восстанавливает связь «псевдоним → клиент» для большинства записей.
 2. **Ряды активности уникальны.** В `ml.fact_client_activity`:
    - помесячный ряд `logins_count` уникален у **805 из 805** клиентов;
    - ряд `mrr` и ряд тарифов уникальны у 195 клиентов (24 %);
    - тройка (первый месяц, последний месяц, был ли уход) уникальна у 49 клиентов;
-   - даже в одном месяце (2026-01) пара (`logins_count`, `bookings_processed`) уникальна у 563 строк из 693.
+   - в одном месяце (2026-01) пара (`logins_count`, `bookings_processed`) уникальна у 563 строк из 693.
 
-   Уникальный ряд сам по себе не раскрывает личность, но позволяет связать записи с любым внешним
-   источником, где есть тот же ряд или его часть (выгрузка биллинга, другая копия данных). Сам проект
-   использует это в `checks.sql` 1.3: клиент находится в `ml` по совпадению ряда. k-анонимность защищает
-   только измерение и на факт не распространяется.
-3. **Стабильный псевдоним.** При той же соли псевдоним одинаков во всех запусках, поэтому выгрузки разных
-   периодов связываются между собой и с уже реидентифицированными записями.
-4. **Кто знает соль, обращает псевдонимы.** Ключи — это 1…1000, и перебор занимает миллисекунды. Соль
+   Те же ряды доступны `ml_user` через `v_ml_client_month`. Уникальный ряд сам по себе не раскрывает
+   личность, но позволяет связать записи с внешним источником, где есть тот же ряд или его часть (выгрузка
+   биллинга, другая копия данных). Проект использует это в `checks.sql` 1.3: клиент находится в `ml`
+   по совпадению ряда. k-анонимность защищает только измерение и на факт не распространяется.
+3. **Стабильный псевдоним.** При той же соли псевдоним одинаков во всех запусках, теперь и после
+   пересоздания контейнера Airflow. Выгрузки разных периодов связываются между собой и с уже
+   реидентифицированными записями.
+4. **Кто знает соль, обращает псевдонимы.** Ключи — это 1…1000, перебор занимает миллисекунды. Соль
    доступна всем, у кого есть доступ к Airflow: `airflow variables get masking_salt` в контейнере
-   возвращает её открытым текстом (проверено), а вход в UI Airflow без пароля. Доступ к значению через UI
+   возвращает её открытым текстом (проверено), вход в UI Airflow без пароля. Доступ к значению через UI
    и REST API не проверялся.
 5. **Усечение до 64 бит.** Коллизий на 805 значениях нет (проверено), на больших объёмах не оценивалось.
 6. **Нет l-разнообразия и t-близости.** В группах может совпадать `churn_flag` или тариф. Не проверялось.
-7. **Смещение выборки.** Подавлено 19,5 % клиентов, неравномерно: Северо-Кавказский округ пропал полностью,
-   крупные отели потеряли 55 % (раздел 7). Как это влияет на качество модели оттока, не оценивалось.
+7. **Смещение выборки.** При K_MIN=5 и квартале подавлено 19,5 % клиентов, неравномерно: Северо-Кавказский
+   округ пропал полностью, крупные отели (100+) потеряли 55 %. Эксперимент 7.3 показывает, что обобщение
+   до полугодия снижает потери до 6,2 %. Влияние на качество модели оттока не оценивалось.
 
 ### 13.2 Слабые места реализации
 
-1. **Соль теряется при пересоздании контейнера Airflow (подтверждено опытом).** Variable `masking_salt`
-   зашифрована Fernet-ключом из `/opt/airflow/airflow.cfg`. Этот файл лежит в файловой системе контейнера,
-   а база Postgres хранится в volume. После `docker compose up -d --force-recreate airflow` хэш значения
-   `airflow variables get masking_salt` изменился. Старое значение, по-видимому, не расшифровалось, и
-   скрипт старта записал новую соль. Запуск 4 прошёл со статусом **PASSED**, но MD5 списка псевдонимов
-   стал другим (`d1922cfe…` вместо `1ecf06dd…`). То есть утверждение README «псевдоним стабилен между
-   запусками» верно только в рамках одного контейнера, и проверки смену псевдонимов не обнаруживают.
-   Механизм (ошибка расшифровки → ветка `elif`) выведен из кода и результата. Сообщение об ошибке
-   в логах не искалось, потому что вывод этих команд в `command` перенаправлен в `/dev/null`.
-2. Если `MASKING_SALT` задан в `.env`, он виден в окружении контейнера (`docker inspect`, `/proc/1/environ`):
-   `unset` действует только на shell-процесс. Это следует из конфигурации, в запуске соль не задавалась.
-3. `log_queries=0` выставляется только в `db.run_sql`. Любой ручной запрос с солью в тексте (например,
-   администратор вычисляет псевдоним вручную) попадёт в `system.query_log`. При подготовке отчёта мои
-   служебные поисковые запросы под `admin` содержали значение соли (первой, до пересоздания) и попали
-   в `query_log` стенда. К коду проекта это не относится, но показывает границу защиты.
-4. `etl_user` имеет `ALL` на обе базы. Это одна учётная запись с доступом и к ПДн, и к обезличенным данным,
-   а её пароль лежит в окружении контейнера Airflow.
-5. `dwh` и `ml` находятся в одном экземпляре ClickHouse: разделение логическое (RBAC), физически хранилище одно.
-6. Нет TLS (HTTP 8123), порты 8123 и 8080 опубликованы на хосте.
-7. Нет row policy и прав на колонки: `ml_user` видит `ml.dim_client` с масками и `ml.masking_log`.
+1. **Демонстрационный `FERNET_KEY` в `.env.example`.** Ключ лежит в репозитории. Любой, у кого есть копия
+   репозитория и доступ к базе Postgres Airflow, расшифрует соль. Для любого использования кроме демо ключ
+   нужно генерировать заново (README, раздел «Запуск»). Ключ виден также в окружении контейнера
+   (`docker inspect`).
+2. **Смена `FERNET_KEY` останавливает Airflow.** Это намеренное поведение (6.3), но ротации Fernet-ключа
+   с перешифровкой Variable (`airflow rotate-fernet-key`) в проекте нет.
+3. Если `MASKING_SALT` задан в `.env`, он виден в окружении контейнера (`docker inspect`, `/proc/1/environ`):
+   `unset` действует только на shell-процесс. Следует из конфигурации; в запуске соль не задавалась
+   (`MASKING_SALT` пустой в `docker inspect`). Явно заданный `MASKING_SALT` перезаписывает сохранённую соль
+   при каждом старте.
+4. `log_queries=0` выставляется только в `db.run_sql`. Ручной запрос с солью в тексте (например,
+   вычисление псевдонима администратором) попадёт в `system.query_log`.
+5. `etl_user` имеет `ALL` на обе базы: одна учётная запись с доступом и к ПДн, и к обезличенным данным;
+   её пароль лежит в окружении контейнера Airflow.
+6. `dwh` и `ml` находятся в одном экземпляре ClickHouse: разделение логическое (RBAC), физически хранилище
+   одно (п. 1(6) приложения № 1 не выполнен, раздел 12.2).
+7. Нет TLS (HTTP 8123), порты 8123 и 8080 опубликованы на хосте.
+8. Права `ml_user` выдаются в `initdb` только при первом старте ClickHouse. На существующем volume `ch_data`
+   правка `01_users.sh` не применится без `docker compose down -v` или ручного `REVOKE`/`GRANT`.
+9. `ml_user` видит `ml.masking_log` целиком, включая `checks_details` с суммами показателей.
 
 ### 13.3 Что не проверялось
 
-- текст приказа № 140 (раздел 12);
 - работа на объёмах больше 1000 клиентов, производительность (замер SHA-256 из README не повторялся);
 - ветка `write_log` со статусом FAILED через DAG; падение `check_rules_cover_schema` на колонке без правила;
   поведение при неизвестном городе (в синтетике таких 0);
-- значения `K_MIN`, отличные от 5;
+- запуск DAG с K_MIN, отличным от 5, и с обобщением до полугодия: значения 3 и 10 и вариант с полугодием
+  посчитаны только скриптом эксперимента по `dwh`, через DAG не прогонялись;
 - атаки с внешними данными (связывание по телефону или ряду MRR выполнено только как подсчёт уникальности,
   атака не моделировалась);
 - доступ к соли через UI и REST API Airflow;
+- ротация `FERNET_KEY` (`airflow rotate-fernet-key`);
 - минимальные требования к памяти;
 - обучение модели оттока на `ml` и сравнение с моделью на `dwh`.
 
-### 13.4 Отличия от реального внедрения
+### 13.4 Отличия от промышленного внедрения
 
 - данные синтетические и детерминированные, `dwh` пересоздаётся генератором; в реальности `dwh` — источник,
   его нельзя DROP;
 - полная перезаливка вместо инкремента;
-- соль в Airflow Variable без внешнего хранилища секретов и без ротации;
+- исходный и обезличенный массивы в одном экземпляре ClickHouse (п. 1(6) приложения № 1);
+- соль в Airflow Variable без внешнего хранилища секретов и без ротации, Fernet-ключ в `.env`;
 - Airflow `standalone` без аутентификации — режим разработки (в логе контейнера: «This is a development/test
   feature only. NEVER use it in production!»);
-- нет организационных мер: приказа об обезличивании, назначенных лиц, оценки достаточности, журнала
-  ручных действий.
+- нет локальных актов (п. 2 приложения № 1), назначенных лиц, журнала ручных действий и операций с обезличенными данными.
 
 ## 14. Как показать проект преподавателю
 
@@ -771,32 +835,40 @@ docker compose up -d
 docker compose exec airflow airflow dags trigger mask_dwh_to_ml
 ```
 
-Остановить с удалением данных:
+Эксперимент K_MIN (после хотя бы одного запуска DAG):
+
+```bash
+docker compose exec -T airflow python -m masking.experiment md
+```
+
+Остановить с удалением данных (соль и псевдонимы будут новыми):
 
 ```bash
 docker compose down -v
 ```
 
-Не делайте `docker compose up -d --force-recreate` и не меняйте compose между показами без `down -v`:
-соль сменится, и псевдонимы станут другими (раздел 13.2.1).
+Если на машине уже есть volumes от предыдущей версии проекта, перед показом нужен `docker compose down -v`:
+права `ml_user` и Fernet-ключ применяются только к новым данным. Пересоздание контейнера Airflow
+(`--force-recreate`) псевдонимы не меняет, пока `FERNET_KEY` в `.env` прежний.
 
 ### 14.2 Порядок демонстрации
 
 1. Airflow → DAG `mask_dwh_to_ml` → **Trigger**. Во вкладке **Graph** шесть задач, все зелёные
-   за ≈ 10–15 с (в запусках 1–2: 13,1 с и 8,1 с).
+   за ≈ 7–13 с (в запусках 1–5: от 7,44 до 13,16 с).
 2. Лог задачи `validate_ml`: восемь строк `[OK  ]` с цифрами из раздела 9.
 3. ClickHouse Play под `etl_user`: запросы 1.1–1.3 из `checks.sql`. Клиент 24 в `dwh` с ПДн, его
    помесячная активность, тот же клиент в `ml` (псевдоним, `o***@gmail.com`, `+7 *** *** 13 51`,
-   Южный / 21–50 / 2024-Q1). Найти его удаётся только по совпадению ряда активности, и это заодно
-   иллюстрирует риск из раздела 13.1 п. 2.
-4. Под `ml_user`: 2.1–2.2 (витрина для ML и отток по округам), 3.1–3.3 (фактическое k, малые группы,
-   журнал), 4.1 (`ACCESS_DENIED`).
+   Южный / 21–50 / 2024-Q1). Найти его удаётся только по совпадению ряда активности, это иллюстрирует
+   риск из 13.1 п. 2. Затем 3.1–3.2: фактическое k и малые группы.
+4. Под `ml_user`: 2.1–2.2 (витрина для ML и отток по округам), 3.3 (журнал), 4.1 (`SHOW GRANTS`),
+   4.2–4.4 (`ACCESS_DENIED` на `dwh.dim_client`, `ml.dim_client`, `ml.fact_client_activity`).
 5. Повторный **Trigger**: в `ml` те же 805 / 16 045, псевдонимы те же, в `masking_log` новая строка.
+6. Таблицы эксперимента: `experiments/k_min_experiment.md` или раздел 7.3.
 
 ### 14.3 Запросы для ClickHouse Play
 
-Play выполняет всё поле как один запрос, поэтому вставляйте по одному. Полный набор лежит в `checks.sql`,
-ниже основные.
+Play выполняет всё поле как один запрос, поэтому запросы вставляются по одному. Полный набор лежит
+в `checks.sql`, ниже основные.
 
 Под `etl_user`:
 
@@ -818,16 +890,16 @@ WHERE f.client_key IN (SELECT client_key FROM ml.fact_client_activity GROUP BY c
 ORDER BY f.date_key;
 ```
 
-Под `ml_user`:
-
-```sql
-SELECT * FROM ml.v_ml_client_month ORDER BY client_key, date_key LIMIT 20;
-```
-
 ```sql
 SELECT min(clients) AS k_actual, count() AS groups, sum(clients) AS clients_total
 FROM (SELECT federal_district, rooms_range, connected_quarter, count() AS clients
       FROM ml.dim_client GROUP BY federal_district, rooms_range, connected_quarter);
+```
+
+Под `ml_user`:
+
+```sql
+SELECT * FROM ml.v_ml_client_month ORDER BY client_key, date_key LIMIT 20;
 ```
 
 ```sql
@@ -837,10 +909,10 @@ FROM ml.masking_log ORDER BY logged_at DESC;
 ```
 
 ```sql
-SELECT * FROM dwh.dim_client LIMIT 5;   -- ожидается Code: 497 ACCESS_DENIED
+SELECT * FROM ml.dim_client LIMIT 5;   -- ожидается Code: 497 ACCESS_DENIED
 ```
 
-Запросы для раздела о рисках, под `ml_user` (их нет в `checks.sql`):
+Запросы для раздела о рисках, под `etl_user` (их нет в `checks.sql`):
 
 ```sql
 SELECT uniqExact(phone_masked) AS distinct_phone_masks,
