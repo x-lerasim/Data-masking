@@ -1,6 +1,3 @@
--- dwh.dim_client → ml.dim_client.
--- ФИО, название отеля и ИНН не выбираются. Клиенты из групп < k_min подавляются.
--- @PSEUDO_KEY@ — выражение псевдонима; соль приходит параметром {salt:String}.
 TRUNCATE TABLE ml.dim_client;
 
 INSERT INTO ml.dim_client

@@ -1,7 +1,3 @@
-"""DAG mask_dwh_to_ml: синтетика в dwh → обезличенная копия в ml → проверки → журнал.
-
-Запуск вручную (кнопка Trigger). Каждый запуск полностью перезаливает ml.
-"""
 from __future__ import annotations
 
 import pendulum
@@ -13,8 +9,6 @@ from synthetic.generate import generate
 
 
 def _salt() -> str:
-    # Variable masking_salt создаётся при первом старте контейнера (docker-compose.yml).
-    # Имя содержит "salt" → Airflow маскирует значение в логах (SENSITIVE_VAR_CONN_NAMES).
     salt = Variable.get("masking_salt")
     masker.check_salt(salt)
     return salt
@@ -33,12 +27,10 @@ def _k_min() -> int:
     max_active_runs=1,
     is_paused_upon_creation=False,
     tags=["masking", "clickhouse", "demo"],
-    doc_md=__doc__,
 )
 def mask_dwh_to_ml():
     @task
     def generate_dwh() -> dict:
-        """Пересоздаёт слой dwh и заполняет его синтетикой (seed фиксирован)."""
         stats = generate()
         print(f"dwh заполнен: {stats}")
         return stats
@@ -73,7 +65,6 @@ def mask_dwh_to_ml():
 
     @task(trigger_rule=TriggerRule.ALL_DONE)
     def write_log() -> str:
-        """Пишет запуск в ml.masking_log — и при успехе, и при падении проверок."""
         ctx = get_current_context()
         ti = ctx["ti"]
         stats: dict = {}

@@ -1,8 +1,3 @@
-"""Синтетическое заполнение слоя 1 (dwh): SaaS для отелей.
-
-Генератор детерминирован (фиксированный seed): при каждом запуске DAG слой dwh
-пересоздаётся с теми же данными, поэтому видно, что псевдонимы стабильны.
-"""
 from __future__ import annotations
 
 import random
@@ -13,11 +8,10 @@ from masking.db import get_client, run_sql_file, scalar
 
 SEED = 20251101
 N_CLIENTS = 1000
-WINDOW_START = date(2024, 11, 1)  # 24 месяца активности: 2024-11 … 2026-10
+WINDOW_START = date(2024, 11, 1)
 N_MONTHS = 24
 DDL = Path(__file__).parent / "ddl_dwh.sql"
 
-# город → вес; распределение по округам совпадает с rules.yaml
 CITIES = {
     "Москва": 20, "Ярославль": 4, "Тула": 3, "Владимир": 3, "Суздаль": 3, "Кострома": 3,
     "Санкт-Петербург": 12, "Калининград": 3, "Великий Новгород": 2, "Мурманск": 1,
@@ -60,7 +54,6 @@ def translit(s: str) -> str:
 
 
 def inn10(r: random.Random) -> str:
-    """ИНН юрлица с корректной контрольной цифрой."""
     d = [r.randint(0, 9) for _ in range(9)]
     d[0] = r.randint(1, 9)
     w = [2, 4, 10, 3, 5, 9, 4, 6, 8]
@@ -68,7 +61,6 @@ def inn10(r: random.Random) -> str:
 
 
 def inn12(r: random.Random) -> str:
-    """ИНН индивидуального предпринимателя с двумя контрольными цифрами."""
     d = [r.randint(0, 9) for _ in range(10)]
     d[0] = r.randint(1, 9)
     w1 = [7, 2, 4, 10, 3, 5, 9, 4, 6, 8]
@@ -89,7 +81,6 @@ def rooms(r: random.Random) -> int:
 
 
 def connected(r: random.Random) -> date:
-    # 2024-Q1 … 2025-Q2, раньше подключившихся больше
     q = r.choices(range(6), [20, 20, 18, 16, 14, 12])[0]
     year, qn = 2024 + q // 4, q % 4
     return date(year, qn * 3 + r.randint(1, 3), r.randint(1, 28))
@@ -140,14 +131,14 @@ def make_facts(r: random.Random, clients: list[tuple]) -> list[tuple]:
     facts = []
     for key, *_, rooms_count, conn in clients:
         tariff = tariff_for(rooms_count, r)
-        health = r.betavariate(5, 2)        # «здоровье» клиента: ниже → выше риск оттока
+        health = r.betavariate(5, 2)
         start = max(add_months(conn.replace(day=1), 1), WINDOW_START)
         month, decline = start, 0
         while month < add_months(WINDOW_START, N_MONTHS):
             hazard = 0.004 + 0.05 * (1 - health) ** 2 + 0.03 * decline
             churn = r.random() < hazard
             if r.random() < 0.08 * (1 - health):
-                decline += 1                # клиент начал «остывать»
+                decline += 1
             k = max(0.15, health - 0.15 * decline)
             staff = max(1, int(rooms_count / 8) + 1)
             active = max(1, round(staff * k * r.uniform(0.7, 1.1)))
@@ -156,7 +147,7 @@ def make_facts(r: random.Random, clients: list[tuple]) -> list[tuple]:
             features = max(1, min(30, round(5 + tariff * 5 * k * r.uniform(0.7, 1.2))))
             tickets = max(0, round(r.gauss(1 + 3 * (1 - k), 1)))
             late = 1 if r.random() < 0.03 + 0.25 * (1 - k) else 0
-            if r.random() < 0.02 and tariff < 4:  # апгрейд тарифа
+            if r.random() < 0.02 and tariff < 4:
                 tariff += 1
             facts.append((key, tariff, month, logins, active, bookings, features, tickets,
                           late, price[tariff], 1 if churn else 0))
@@ -187,7 +178,6 @@ def generate() -> dict:
         "bookings_processed", "features_used", "tickets_count", "late_payments", "mrr",
         "churn_flag"])
 
-    # Ссылочная целостность: ClickHouse не проверяет внешние ключи — проверяем сами.
     orphans = scalar(ch, """
         SELECT countIf(c.client_key = 0) + countIf(t.tariff_key = 0) + countIf(d.year = 0)
         FROM dwh.fact_client_activity f

@@ -1,5 +1,3 @@
-<!-- Уровень trace (по умолчанию в образе) пишет URI HTTP-запросов вместе с
-     param_* — туда попала бы соль. Оставляем information. -->
 <clickhouse>
     <logger>
         <level>information</level>

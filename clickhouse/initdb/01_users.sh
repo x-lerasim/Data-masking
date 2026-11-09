@@ -1,5 +1,4 @@
 #!/bin/bash
-# Базы и пользователи. Выполняется один раз при первом старте ClickHouse.
 set -euo pipefail
 clickhouse client --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" --multiquery <<SQL
 CREATE DATABASE IF NOT EXISTS dwh COMMENT 'Слой 1: витрина с персональными данными';

@@ -1,6 +1,3 @@
--- Слой 1 (dwh): звезда по Кимбаллу с персональными данными.
--- Полная перезагрузка: таблицы пересоздаются при каждом generate_dwh.
-
 DROP TABLE IF EXISTS dwh.fact_client_activity;
 DROP TABLE IF EXISTS dwh.dim_client;
 DROP TABLE IF EXISTS dwh.dim_tariff;

@@ -1,4 +1,3 @@
--- Измерения без персональных данных копируются без изменений.
 TRUNCATE TABLE ml.dim_tariff;
 INSERT INTO ml.dim_tariff SELECT tariff_key, tariff_name, price FROM dwh.dim_tariff;
 

@@ -1,6 +1,3 @@
--- dwh.fact_client_activity → ml.fact_client_activity.
--- Показатели без изменений, client_key → тот же псевдоним, что в dim_client.
--- Строки подавленных клиентов не переносятся.
 TRUNCATE TABLE ml.fact_client_activity;
 
 INSERT INTO ml.fact_client_activity

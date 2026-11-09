@@ -1,6 +1,3 @@
--- Квазиидентификаторы клиентов dwh и размер их группы.
--- Подставляется подзапросом вместо @QI_SOURCE@ (маскирование и проверки
--- считают подавление одной и той же формулой). Соль здесь не нужна.
 SELECT
     client_key AS src_key,
     transform(city, {cities:Array(String)}, {districts:Array(String)}, {unknown_district:String})

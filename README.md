@@ -73,7 +73,11 @@ Postgres 17 для метаданных Airflow, clickhouse-connect. Три ко
 
 ## Запуск
 
-Нужен Docker с Compose v2. Одна команда:
+Нужен Docker с Compose v2. Без `.env` compose не запустится.
+
+```bash
+cp .env.example .env
+```
 
 ```bash
 docker compose up -d
@@ -109,7 +113,8 @@ docker compose up -d
 ## Структура
 
 ```
-docker-compose.yml        postgres + clickhouse + airflow (standalone, LocalExecutor), вся конфигурация
+docker-compose.yml        postgres + clickhouse + airflow (standalone, LocalExecutor)
+.env.example              пароли, K_MIN, MASKING_SALT
 clickhouse/initdb/        базы dwh, ml и пользователи etl_user, ml_user (RBAC)
 clickhouse/config/        уровень логов information (см. «Соль»)
 dags/mask_dwh_to_ml.py    DAG: только вызывает функции модулей
@@ -152,8 +157,9 @@ checks.sql                запросы для показа
 1…1000 перебираются за миллисекунды. С солью перебор бесполезен, а одинаковый
 ключ при той же соли всегда даёт тот же псевдоним — поэтому он стабилен между запусками.
 
-- генерируется сама при первом `docker compose up` (64 hex-символа) и хранится как
-  Airflow Variable `masking_salt` в Postgres Airflow; в git, SQL-файлах и `ml` её нет;
+- берётся из `MASKING_SALT` в `.env`; если там пусто — генерируется при первом старте
+  (64 hex-символа). Хранится как Airflow Variable `masking_salt` в Postgres Airflow;
+  `.env` в `.gitignore`, в git, SQL-файлах и `ml` соли нет;
 - в ClickHouse передаётся параметром запроса `{salt:String}`;
 - ClickHouse по умолчанию записывает в журнал `system.query_log` текст запроса
   с уже подставленными значениями параметров — соль оказывалась бы там в открытом
@@ -177,7 +183,7 @@ SHA-256 — 1,3 с, `sipHash64` — 0,33 с, `cityHash64` — 0,14 с. У нас
 Квазиидентификаторы: `federal_district`, `rooms_range`, `connected_quarter`.
 Размер группы считается по **клиентам** `dim_client` (окно `count() OVER (PARTITION BY …)`
 в `dwh_client_qi.sql`), а не по строкам факта. Клиенты из групп меньше `K_MIN`
-(Variable `k_min` = 5, задаётся в `docker-compose.yml`) в `ml` не попадают, их строки факта тоже.
+(`K_MIN` в `.env` → Variable `k_min`) в `ml` не попадают, их строки факта тоже.
 
 При `K_MIN = 5` подавляется 195 клиентов из 1000 (3 883 строки факта), в `ml`
 остаётся 805 клиентов в 65 группах, фактическое k = 5. Подавление в основном

@@ -1,12 +1,3 @@
-"""Модуль маскирования dwh → ml.
-
-Вся трансформация — в SQL-файлах masking/sql/, правила по полям — в rules.yaml.
-Здесь только сборка параметров, запуск SQL и подсчёт статистики.
-
-Соль передаётся в ClickHouse только как параметр запроса {salt:String}
-(server-side binding clickhouse-connect): в тексте SQL её нет, в ml она не пишется,
-функции модуля её не логируют и не возвращают.
-"""
 from __future__ import annotations
 
 import json
@@ -29,7 +20,6 @@ def rules() -> dict:
 
 
 def _render(sql_name: str) -> str:
-    """Подставляет общие фрагменты (@QI_SOURCE@, @PSEUDO_KEY@) в SQL-файл."""
     text = (SQL_DIR / sql_name).read_text(encoding="utf-8")
     qi = (SQL_DIR / "dwh_client_qi.sql").read_text(encoding="utf-8")
     return text.replace("@QI_SOURCE@", "\n" + qi + "\n").replace("@PSEUDO_KEY@", PSEUDO_KEY)
@@ -54,7 +44,6 @@ def check_salt(salt: str | None) -> None:
 
 
 def check_rules_cover_schema(ch) -> None:
-    """Каждая колонка dwh-таблицы должна иметь правило в rules.yaml."""
     tables = rules()["tables"]
     for table, fields in tables.items():
         cols = [r[0] for r in ch.query(
@@ -107,7 +96,6 @@ def mask_fact(salt: str, k_min: int) -> dict:
 
 
 def _parse_checks(text: str) -> list[tuple[str, str, str]]:
-    """Разбирает validate_ml.sql на блоки (имя, описание, SQL)."""
     blocks = re.split(r"^-- check:\s*", text, flags=re.M)[1:]
     out = []
     for b in blocks:
@@ -119,7 +107,6 @@ def _parse_checks(text: str) -> list[tuple[str, str, str]]:
 
 
 def validate(k_min: int) -> list[dict]:
-    """Выполняет все проверки и возвращает их результат (без исключения)."""
     ch = get_client()
     params = _rule_params(k_min)
     results = []

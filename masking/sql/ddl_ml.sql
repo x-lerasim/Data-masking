@@ -1,7 +1,3 @@
--- Слой 2 (ml): обезличенная звезда. Таблицы создаются один раз,
--- данные полностью перезаливаются (TRUNCATE + INSERT) при каждом запуске DAG.
--- masking_log не очищается: это журнал запусков.
-
 CREATE TABLE IF NOT EXISTS ml.dim_client
 (
     client_key        String COMMENT 'Псевдоним: SHA-256 с секретной солью',
@@ -70,7 +66,6 @@ CREATE TABLE IF NOT EXISTS ml.masking_log
 ENGINE = MergeTree ORDER BY logged_at
 COMMENT 'Журнал запусков маскирования';
 
--- Источник для ML: без email_masked и phone_masked
 CREATE OR REPLACE VIEW ml.v_ml_client_month AS
 SELECT
     f.client_key AS client_key,
