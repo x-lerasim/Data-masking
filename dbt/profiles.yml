@@ -1,0 +1,15 @@
+data_masking:
+  target: ml
+  outputs:
+    ml:
+      type: clickhouse
+      driver: http
+      host: "{{ env_var('CLICKHOUSE_HOST', 'clickhouse') }}"
+      port: 8123
+      user: "{{ env_var('ETL_USER', 'etl_user') }}"
+      password: "{{ env_var('ETL_USER_PASSWORD') }}"
+      schema: ml
+      threads: 1
+      custom_settings:
+        log_queries: 0
+        SQL_masking_salt: "{{ env_var('MASKING_SALT') }}"

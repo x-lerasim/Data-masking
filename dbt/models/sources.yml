@@ -1,0 +1,10 @@
+version: 2
+
+sources:
+  - name: dwh
+    schema: dwh
+    tables:
+      - name: dim_client
+      - name: dim_tariff
+      - name: dim_date
+      - name: fact_client_activity

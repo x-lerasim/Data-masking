@@ -4,7 +4,7 @@ import random
 from datetime import date
 from pathlib import Path
 
-from masking.db import get_client, run_sql_file, scalar
+from synthetic.db import get_client, run_sql_file, scalar
 
 SEED = 20251101
 N_CLIENTS = 1000

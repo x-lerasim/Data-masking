@@ -1,21 +1,23 @@
 from __future__ import annotations
 
-import pendulum
-from airflow.sdk import Variable, dag, task
+import os
 
-from masking import masker
+import pendulum
+from airflow.providers.docker.operators.docker import DockerOperator
+from airflow.sdk import dag, task
+
 from synthetic.generate import generate
 
 
 @dag(
     dag_id="mask_dwh_to_ml",
-    description="Обезличивание: dwh (звезда с ПДн) → ml (без ПДн, client_key — хеш с солью)",
+    description="Обезличивание: dwh (звезда с ПДн) → ml (dbt: без ПДн, client_key — хеш с солью)",
     schedule=None,
     start_date=pendulum.datetime(2025, 1, 1, tz="Europe/Moscow"),
     catchup=False,
     max_active_runs=1,
     is_paused_upon_creation=False,
-    tags=["masking", "clickhouse", "demo"],
+    tags=["masking", "clickhouse", "dbt", "demo"],
 )
 def mask_dwh_to_ml():
     @task
@@ -24,14 +26,22 @@ def mask_dwh_to_ml():
         print(f"dwh заполнен: {stats}")
         return stats
 
-    @task
-    def mask_to_ml() -> dict:
-        counts = masker.mask_to_ml(Variable.get("masking_salt"))
-        for table, n in counts.items():
-            print(f"{table}: {n}")
-        return counts
+    mask_to_ml = DockerOperator(
+        task_id="mask_to_ml",
+        image="data-masking-dbt:latest",
+        command="dbt --no-use-colors run",
+        docker_url="unix://var/run/docker.sock",
+        network_mode="data-masking_default",
+        auto_remove="success",
+        mount_tmp_dir=False,
+        environment={"CLICKHOUSE_HOST": "clickhouse", "ETL_USER": "etl_user"},
+        private_environment={
+            "ETL_USER_PASSWORD": os.environ.get("ETL_USER_PASSWORD", ""),
+            "MASKING_SALT": os.environ.get("MASKING_SALT", ""),
+        },
+    )
 
-    generate_dwh() >> mask_to_ml()
+    generate_dwh() >> mask_to_ml
 
 
 mask_dwh_to_ml()

@@ -6,9 +6,6 @@ from pathlib import Path
 import clickhouse_connect
 from clickhouse_connect.driver.client import Client
 
-SQL_DIR = Path(__file__).parent / "sql"
-
-
 def get_client() -> Client:
     return clickhouse_connect.get_client(
         host=os.environ.get("CLICKHOUSE_HOST", "localhost"),
@@ -35,19 +32,10 @@ def split_sql(text: str) -> list[str]:
     return statements
 
 
-SECRET_PARAMS = {"salt"}
-NO_QUERY_LOG = {"log_queries": 0, "log_query_threads": 0, "log_query_views": 0}
+def run_sql_file(client: Client, path: Path | str) -> None:
+    for stmt in split_sql(Path(path).read_text(encoding="utf-8")):
+        client.command(stmt)
 
 
-def run_sql(client: Client, text: str, parameters: dict | None = None) -> None:
-    settings = NO_QUERY_LOG if SECRET_PARAMS & set(parameters or {}) else None
-    for stmt in split_sql(text):
-        client.command(stmt, parameters=parameters or None, settings=settings)
-
-
-def run_sql_file(client: Client, path: Path | str, parameters: dict | None = None) -> None:
-    run_sql(client, Path(path).read_text(encoding="utf-8"), parameters)
-
-
-def scalar(client: Client, sql: str, parameters: dict | None = None):
-    return client.query(sql, parameters=parameters or None).result_rows[0][0]
+def scalar(client: Client, sql: str):
+    return client.query(sql).result_rows[0][0]

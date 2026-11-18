@@ -1,0 +1,12 @@
+name: data_masking
+version: "1.0"
+profile: data_masking
+config-version: 2
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+
+models:
+  data_masking:
+    ml:
+      +materialized: table

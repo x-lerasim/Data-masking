@@ -6,8 +6,6 @@ x-airflow-env: &airflow-env
   AIRFLOW__CORE__LOAD_EXAMPLES: "False"
   AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "False"
   AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "True"
-  AIRFLOW__CORE__SENSITIVE_VAR_CONN_NAMES: "salt"
-  AIRFLOW__CORE__FERNET_KEY: ${FERNET_KEY:?нет .env}
   _PIP_ADDITIONAL_REQUIREMENTS: clickhouse-connect==1.12.0
   PYTHONPATH: /opt/airflow/project
   CLICKHOUSE_HOST: clickhouse
@@ -50,27 +48,27 @@ services:
 
   airflow:
     image: apache/airflow:3.4.0-python3.12
-    command:
-      - bash
-      - -c
-      - |
-        set -e
-        airflow db migrate > /dev/null
-        python -m masking.init_salt
-        unset MASKING_SALT
-        exec airflow standalone
+    command: standalone
+    group_add:
+      - "${DOCKER_GID:-0}"
     environment:
       <<: *airflow-env
-      MASKING_SALT: ${MASKING_SALT?нет .env}
+      MASKING_SALT: ${MASKING_SALT:?нет .env}
     ports:
       - "8080:8080"
     volumes:
       - ./dags:/opt/airflow/dags
-      - ./masking:/opt/airflow/project/masking
       - ./synthetic:/opt/airflow/project/synthetic
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       postgres: { condition: service_healthy }
       clickhouse: { condition: service_healthy }
+      dbt: { condition: service_completed_successfully }
+
+  dbt:
+    build: ./dbt
+    image: data-masking-dbt:latest
+    restart: "no"
 
 volumes:
   pg_data:
