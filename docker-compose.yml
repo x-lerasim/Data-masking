@@ -10,7 +10,6 @@ x-airflow-env: &airflow-env
   AIRFLOW__CORE__FERNET_KEY: ${FERNET_KEY:?нет .env}
   _PIP_ADDITIONAL_REQUIREMENTS: clickhouse-connect==1.12.0
   PYTHONPATH: /opt/airflow/project
-  AIRFLOW_VAR_K_MIN: ${K_MIN:?нет .env}
   CLICKHOUSE_HOST: clickhouse
   CLICKHOUSE_PORT: "8123"
   ETL_USER: etl_user
