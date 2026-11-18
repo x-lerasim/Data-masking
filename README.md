@@ -20,8 +20,8 @@ DAG `mask_dwh_to_ml` в Airflow:
 
 ```
 generate_dwh  →  mask_to_ml
-(Python,         (DockerOperator: контейнер data-masking-dbt, команда dbt run)
- пишет dwh)
+(BashOperator:    (DockerOperator: контейнер data-masking-dbt, команда dbt run)
+ python synthetic/generate.py)
 ```
 
 Образ `data-masking-dbt` собирается из `dbt/Dockerfile` при `docker compose up`. Сервис `dbt`
@@ -110,8 +110,8 @@ docker-compose.yml        postgres + clickhouse + airflow + сборка обр�
 .env.example              пароли, MASKING_SALT, DOCKER_GID
 clickhouse/initdb/        базы dwh, ml и пользователи etl_user, ml_user
 clickhouse/config/        уровень серверного лога information
-dags/mask_dwh_to_ml.py    DAG: generate_dwh >> mask_to_ml (DockerOperator с dbt run)
-synthetic/                DDL слоя dwh, генератор синтетики, подключение к ClickHouse
+dags/mask_dwh_to_ml.py    DAG: generate_dwh (python generate.py) >> mask_to_ml (dbt run в контейнере)
+synthetic/                DDL слоя dwh и скрипт генератора синтетики
 dbt/
   Dockerfile              python:3.12-slim + dbt-clickhouse
   dbt_project.yml

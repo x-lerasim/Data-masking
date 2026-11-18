@@ -1,30 +1,22 @@
-from __future__ import annotations
-
 import os
 
-import pendulum
 from airflow.providers.docker.operators.docker import DockerOperator
-from airflow.sdk import dag, task
+from airflow.providers.standard.operators.bash import BashOperator
+from airflow.sdk import DAG
 
-from synthetic.generate import generate
-
-
-@dag(
+with DAG(
     dag_id="mask_dwh_to_ml",
     description="Обезличивание: dwh (звезда с ПДн) → ml (dbt: без ПДн, client_key — хеш с солью)",
     schedule=None,
-    start_date=pendulum.datetime(2025, 1, 1, tz="Europe/Moscow"),
     catchup=False,
     max_active_runs=1,
     is_paused_upon_creation=False,
     tags=["masking", "clickhouse", "dbt", "demo"],
-)
-def mask_dwh_to_ml():
-    @task
-    def generate_dwh() -> dict:
-        stats = generate()
-        print(f"dwh заполнен: {stats}")
-        return stats
+):
+    generate_dwh = BashOperator(
+        task_id="generate_dwh",
+        bash_command="python /opt/airflow/project/synthetic/generate.py",
+    )
 
     mask_to_ml = DockerOperator(
         task_id="mask_to_ml",
@@ -41,7 +33,4 @@ def mask_dwh_to_ml():
         },
     )
 
-    generate_dwh() >> mask_to_ml
-
-
-mask_dwh_to_ml()
+    generate_dwh >> mask_to_ml

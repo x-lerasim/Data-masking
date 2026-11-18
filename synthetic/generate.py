@@ -1,10 +1,9 @@
-from __future__ import annotations
-
+import os
 import random
 from datetime import date
 from pathlib import Path
 
-from synthetic.db import get_client, run_sql_file, scalar
+import clickhouse_connect
 
 SEED = 20251101
 N_CLIENTS = 1000
@@ -166,8 +165,15 @@ def generate() -> dict:
         d = add_months(WINDOW_START, i)
         dates.append((d, d.year, (d.month - 1) // 3 + 1, d.month))
 
-    ch = get_client()
-    run_sql_file(ch, DDL)
+    ch = clickhouse_connect.get_client(
+        host=os.environ.get("CLICKHOUSE_HOST", "clickhouse"),
+        port=int(os.environ.get("CLICKHOUSE_PORT", "8123")),
+        username=os.environ.get("ETL_USER", "etl_user"),
+        password=os.environ["ETL_USER_PASSWORD"],
+    )
+    for stmt in DDL.read_text(encoding="utf-8").split(";"):
+        if stmt.strip():
+            ch.command(stmt)
     ch.insert("dwh.dim_client", clients, column_names=[
         "client_key", "contact_name", "email", "phone", "inn", "hotel_name", "city",
         "rooms_count", "connected_date"])
@@ -178,17 +184,21 @@ def generate() -> dict:
         "bookings_processed", "features_used", "tickets_count", "late_payments", "mrr",
         "churn_flag"])
 
-    orphans = scalar(ch, """
+    orphans = ch.query("""
         SELECT countIf(c.client_key = 0) + countIf(t.tariff_key = 0) + countIf(d.year = 0)
         FROM dwh.fact_client_activity f
         LEFT JOIN dwh.dim_client c ON f.client_key = c.client_key
         LEFT JOIN dwh.dim_tariff t ON f.tariff_key = t.tariff_key
-        LEFT JOIN dwh.dim_date   d ON f.date_key   = d.date_key""")
+        LEFT JOIN dwh.dim_date   d ON f.date_key   = d.date_key""").result_rows[0][0]
     if orphans:
         raise RuntimeError(f"dwh: {orphans} строк факта без пары в измерениях")
-    dupes = scalar(ch, """SELECT count() - uniqExact(client_key, date_key)
-                          FROM dwh.fact_client_activity""")
+    dupes = ch.query("""SELECT count() - uniqExact(client_key, date_key)
+                        FROM dwh.fact_client_activity""").result_rows[0][0]
     if dupes:
         raise RuntimeError(f"dwh: нарушено зерно клиент×месяц ({dupes} дублей)")
     return {"dim_client": len(clients), "dim_tariff": len(TARIFFS),
             "dim_date": len(dates), "fact_client_activity": len(facts)}
+
+
+if __name__ == "__main__":
+    print(f"dwh заполнен: {generate()}")
